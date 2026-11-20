@@ -102,6 +102,8 @@ bool write_file_atomic(const char* path, const std::string& data) {
         // and its eigenvalue-ratio gate
         {"doa_track",                "DOA_TRACK:",                VType::STRING, "off"},
         {"doa_track_gate",           "DOA_TRACK_GATE:",           VType::NUMBER, "3.0"},
+        // its Kalman filter's tuning, key=value,... ("" = the defaults)
+        {"doa_track_params",         "DOA_TRACK_PARAMS:",         VType::STRING, ""},
         {"num_snapshots",            "MUSIC_NUM_SNAPSHOTS:",      VType::NUMBER, "32"},
         {"snapshot_length",          "MUSIC_SNAPSHOT_LENGTH:",    VType::NUMBER, "256"},
         // Signal-subspace dimension; 0 = automatic (eigenvalue threshold)

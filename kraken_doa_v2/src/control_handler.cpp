@@ -353,7 +353,7 @@ static bool is_replayed_command(string_view msg) {
         "TOPOLOGY:", "CUSTOM_POSITIONS:", "ARRAY_LAYOUT:", "RADIUS:", "SPACING:", "ELEVATION_RESOLUTION:",
         "MUSIC_NUM_SNAPSHOTS:", "MUSIC_SNAPSHOT_LENGTH:",
         "MUSIC_FB_AVERAGING:", "MUSIC_COVARIANCE_ALPHA:", "EDGE_CLIP:",
-        "DOA_TRACK:", "DOA_TRACK_GATE:",   // bearing tracker
+        "DOA_TRACK:", "DOA_TRACK_GATE:", "DOA_TRACK_PARAMS:",   // bearing tracker
         "MUSIC_SIGNAL_SOURCES:", "ULA_MODE:", "CUSTOM_MODE:", "ARRAY_OFFSET:",
         // Beamforming settings (on/off itself rides system_status; the mode
         // only does while beamforming is on)
@@ -1670,6 +1670,17 @@ void ControlHandler::handle_message_impl(string_view message) {
         const float r = std::clamp(parse_float(message, 15), doatrack::MIN_RATIO_LO, doatrack::MIN_RATIO_HI);
         doatrack::g_min_ratio.store(r, std::memory_order_relaxed);
         set_applied("DOA_TRACK_GATE:", r, 1);
+    }
+    else if (message.starts_with("DOA_TRACK_PARAMS:")) {
+        // Bearing tracker tuning, live (bearing_tracker.hpp PARAM_SPECS):
+        // key=value,... (any subset) or "default". Clamped to the ranges;
+        // the applied form - every parameter - is what is saved and synced.
+        // Running tracks keep going with the new values
+        std::string err;
+        if (!doatrack::apply_params(message.substr(17), &err))
+            throw CommandRejected(err);
+        g_applied_cmd = "DOA_TRACK_PARAMS:" + doatrack::params_string();
+        cout << "DoA bearing tracker parameters: " << doatrack::params_string() << endl;
     }
     else if (message.starts_with("DOA_TRACK:")) {
         // Bearing tracker (bearing_tracker.hpp, docs/dev/doa-tracking.md):

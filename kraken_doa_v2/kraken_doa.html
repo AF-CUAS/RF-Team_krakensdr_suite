@@ -2501,6 +2501,23 @@ body.drive.drive-day .drive-hud,body.drive.drive-day .ui-dlg-bg {
             <span class="sv" id="doa-track-gate-val">3.0</span>
           </div>
           <div class="ctrl-row">
+            <label>Tuning<span class="help" tabindex="0" role="button" aria-label="Help">?<span class="tip">The tracker's Kalman filter, live: every value applies at once to the running tracks, is saved, and shows on every open page. NIS (normalised innovation squared) near 1 means the filter matches the data: well above 1 - it is surprised, raise q (or meas k); well below 1 - it is too cautious, lower them. Copy the line to log what you tried; paste a line and Apply to restore one.</span></span></label>
+            <button class="btn" id="dtp-btn" onclick="dtpToggle()" aria-expanded="false" aria-controls="dtp-panel" style="flex:1">Show</button>
+          </div>
+          <div id="dtp-panel" style="display:none">
+            <div id="dtp-rows"></div>
+            <div class="ctrl-row">
+              <input type="text" id="dtp-line" spellcheck="false" aria-label="Tracker parameters" style="flex:1;min-width:0;font-family:monospace;font-size:10px" title="Every tracker parameter as one line: copy it to log a setting, paste one and Apply to restore it">
+            </div>
+            <div class="ctrl-row">
+              <button class="btn" id="dtp-apply" onclick="dtpApplyLine()" style="flex:1" title="Apply the line above">Apply</button>
+              <button class="btn" id="dtp-copy" onclick="dtpCopy()" style="flex:1" title="Copy the line above">Copy</button>
+              <button class="btn" id="dtp-defaults" onclick="dtpDefaults()" style="flex:1" title="Every tracker parameter back to its default">Defaults</button>
+            </div>
+            <div id="dtp-msg" class="sb-note"></div>
+            <div id="dtp-diag" class="sb-note" style="font-family:monospace;font-size:10px;white-space:pre-wrap"></div>
+          </div>
+          <div class="ctrl-row">
             <label>Sources<span class="help" tabindex="0" role="button" aria-label="Help">?<span class="tip">Expected number of emitters to resolve. Auto counts eigenvalues standing 6 dB above the noise floor AND within 12 dB of the strongest signal - leakage from calibration residuals and multipath is ignored.</span></span></label>
             <select id="music-signal-sources" onchange="updateMusicSignalSources(this.value)" style="width:70px">
               <option value="0">Auto</option>
@@ -6898,6 +6915,10 @@ function applySyncCmdInner(cmd) {
   else if ((v = arg('DOA_TRACK:')) !== null) {
     doaTrackApplyProfile(v);
   }
+  else if ((v = arg('DOA_TRACK_PARAMS:')) !== null) {
+    dtpValues = Object.assign({}, dtpValues, dtpParse(v).out);
+    dtpShow();
+  }
   else if ((v = arg('DOA_TRACK_GATE:')) !== null) {
     const el = $id('doa-track-gate');
     if (idle(el) && parseFloat(el.value) !== parseFloat(v)) { el.value = parseFloat(v); $id('doa-track-gate-val').textContent = parseFloat(v).toFixed(1); }
@@ -9559,6 +9580,10 @@ function updateDoaTrackGate(val) {
   $id('doa-track-gate-val').textContent = parseFloat(val).toFixed(1);
   send('DOA_TRACK_GATE:' + parseFloat(val).toFixed(1));
 }
+// the Tuning panel opens as it was left (this browser only)
+window.addEventListener('load', () => {
+  try { if (localStorage.getItem('kraken_dtp_open') === '1') dtpToggle(true); } catch (e) { /* private mode */ }
+});
 function doaTrackApplyProfile(v) {
   doaTrackProfile = v;
   const el = $id('doa-track');
@@ -9585,6 +9610,7 @@ function doaTrackReadout(id, t) {
 }
 function dtOnMessage(m) {
   if (m.profile && m.profile !== doaTrackProfile) doaTrackApplyProfile(m.profile);
+  dtpDiag(m);
   const seen = new Set();
   for (const t of (m.tracks || [])) {
     const p = doaPlots[t.id];
@@ -9604,6 +9630,115 @@ function dtOnMessage(m) {
   }
   for (const id in doaTracks) if (!seen.has(String(id))) { delete doaTracks[id]; delete doaTrackHist[id]; }
   if (typeof mapDraw === 'function') mapDraw();
+}
+
+// Tracker tuning (DOA_TRACK_PARAMS:): mirrors bearing_tracker.hpp PARAM_SPECS - keep the keys and
+// ranges alike (the receiver clamps anyway). [key, label, unit, min, max, step, help]
+const DTP_SPECS = [
+  ['q', 'q', 'deg\u00b2/s\u00b3', 0, 100000, 10, 'Process noise: how fast the bearing rate may change. sqrt(q) is about the rate change in a second. 0 = the profile\'s (Slow 10, Normal 100, Fast 625). Higher follows manoeuvres sooner but passes more noise.'],
+  ['gate_sigma', 'Gate', '\u03c3', 1, 20, 0.5, 'A frame further than this many standard deviations from the prediction is rejected as an outlier (multipath, a noise peak).'],
+  ['gate_floor', 'Gate floor', '\u00b0', 0, 90, 1, 'The outlier gate is never narrower than this.'],
+  ['reacquire', 'Reacquire', 'frames', 1, 50, 1, 'This many rejected frames in a row start a new track at the new bearing (the emitter really moved, or another took over).'],
+  ['confirm', 'Confirm', 'frames', 1, 50, 1, 'Frames a new track needs before it counts as tracking.'],
+  ['init_rate', 'Init rate', '\u00b0/s', 1, 360, 1, 'How fast a new track may be moving (1 sigma of its starting rate).'],
+  ['max_rate', 'Max rate', '\u00b0/s', 1, 720, 5, 'The bearing rate is clamped to this.'],
+  ['coast_ms', 'Coast after', 'ms', 50, 10000, 50, 'No frame for this long (or 3 frame spacings, if longer) and the track coasts: predicted, drawn dashed.'],
+  ['lost_ms', 'Lost after', 'ms', 100, 120000, 500, 'No frame for this long and the track is lost: held grey, the next frame starts a new one.'],
+  ['meas_k', 'Meas k', '\u00b0', 0.1, 100, 0.5, 'Measurement noise: a frame\'s bearing sigma = k / sqrt(eigenvalue ratio - 1). Higher trusts each frame less (smoother, slower).'],
+  ['meas_min', 'Meas min', '\u00b0', 0.01, 90, 0.1, 'Smallest measurement sigma (a very strong signal).'],
+  ['meas_max', 'Meas max', '\u00b0', 0.1, 90, 0.5, 'Largest measurement sigma (a signal just above the gate).'],
+  ['shrink', 'Rate shrink', '', 0, 1, 1, 'While coasting, trust the rate only as far as it is known (on), or extrapolate it fully (off). On did better through gaps between bursts.'],
+];
+let dtpValues = {};   // the receiver's applied parameters (DOA_TRACK_PARAMS: sync)
+const dtpEsc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const dtpIdle = el => el && document.activeElement !== el;   // not being edited
+function dtpBuildRows() {
+  const box = $id('dtp-rows');
+  if (!box || box.dataset.built) return;
+  box.dataset.built = '1';
+  box.innerHTML = DTP_SPECS.map(([k, label, unit, lo, hi, step, help]) =>
+    `<div class="ctrl-row"><label>${dtpEsc(label)}<span class="help" tabindex="0" role="button" aria-label="Help">?<span class="tip">${dtpEsc(help)}</span></span></label>` +
+    (k === 'shrink'
+      ? `<input type="checkbox" class="sw" id="dtp-${k}" onchange="dtpSet('${k}', this.checked ? 1 : 0)">`
+      : `<input type="number" id="dtp-${k}" min="${lo}" max="${hi}" step="${step}" style="width:80px" onchange="dtpSet('${k}', this.value)">` +
+        (unit ? `<span class="u">${dtpEsc(unit)}</span>` : '')) +
+    `</div>`).join('');
+  dtpShow();
+}
+function dtpParse(line) {
+  const out = {}, bad = [];
+  for (const part of String(line).split(',')) {
+    const t = part.trim();
+    if (!t) continue;
+    const i = t.indexOf('=');
+    const k = i < 0 ? t : t.slice(0, i).trim(), v = i < 0 ? '' : t.slice(i + 1).trim();
+    if (i < 0 || !DTP_SPECS.some(s => s[0] === k) || v === '' || !Number.isFinite(Number(v))) bad.push(t);
+    else out[k] = Number(v);
+  }
+  return {out, bad};
+}
+function dtpLine() { return DTP_SPECS.filter(s => s[0] in dtpValues).map(s => s[0] + '=' + dtpValues[s[0]]).join(','); }
+// the inputs and the line from dtpValues (not the one being edited)
+function dtpShow() {
+  for (const [k] of DTP_SPECS) {
+    const el = $id('dtp-' + k);
+    if (!el || !(k in dtpValues)) continue;
+    if (el.type === 'checkbox') { if (el.checked !== (dtpValues[k] >= 0.5)) el.checked = dtpValues[k] >= 0.5; }
+    else if (dtpIdle(el) && (el.value === '' || Number(el.value) !== dtpValues[k])) el.value = dtpValues[k];   // '' is Number 0 too
+  }
+  const line = $id('dtp-line');
+  if (line && dtpIdle(line)) line.value = dtpLine();
+}
+function dtpSet(k, v) {
+  if (!Number.isFinite(Number(v)) || String(v).trim() === '') { dtpShow(); return; }
+  dtpMsg('');
+  send('DOA_TRACK_PARAMS:' + k + '=' + Number(v));
+}
+function dtpApplyLine() {
+  const line = ($id('dtp-line').value || '').trim();
+  if (!line) return;
+  if (line === 'default' || line === 'defaults') { dtpDefaults(); return; }
+  const {out, bad} = dtpParse(line);
+  if (bad.length) { dtpMsg('Not applied - not a tracker parameter: ' + bad.join(', '), true); return; }
+  dtpMsg('');
+  send('DOA_TRACK_PARAMS:' + Object.entries(out).map(([k, v]) => k + '=' + v).join(','));
+  $id('dtp-line').blur();
+}
+function dtpDefaults() { dtpMsg(''); send('DOA_TRACK_PARAMS:default'); }
+function dtpCopy() {
+  const el = $id('dtp-line'), txt = el.value;
+  const ok = () => dtpMsg('Copied');
+  try {
+    if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(txt).then(ok, () => { el.select(); dtpMsg('Selected - press Ctrl+C'); }); return; }
+  } catch (e) { /* fall through */ }
+  el.select(); dtpMsg('Selected - press Ctrl+C');
+}
+function dtpMsg(t, warn) {
+  const el = $id('dtp-msg');
+  if (!el) return;
+  el.textContent = t;
+  el.style.color = warn ? '#e3a842' : '';
+}
+function dtpOpen() { const p = $id('dtp-panel'); return !!p && p.style.display !== 'none'; }
+function dtpToggle(force) {
+  const p = $id('dtp-panel'), b = $id('dtp-btn');
+  if (!p || !b) return;
+  const on = force !== undefined ? force : !dtpOpen();
+  if (on) dtpBuildRows();
+  p.style.display = on ? '' : 'none';
+  b.textContent = on ? 'Hide' : 'Show';
+  b.setAttribute('aria-expanded', on ? 'true' : 'false');
+  try { localStorage.setItem('kraken_dtp_open', on ? '1' : '0'); } catch (e) { /* private mode */ }
+}
+// the live diagnostics of every track (dtOnMessage, while the panel is open)
+function dtpDiag(m) {
+  const el = $id('dtp-diag');
+  if (!el || !dtpOpen()) return;
+  const rows = (m.tracks || []).map(t =>
+    `D${t.id} ${t.state.padEnd(9)} innov ${(t.innov >= 0 ? '+' : '') + Number(t.innov).toFixed(2)}\u00b0  NIS ${Number(t.nis).toFixed(2)}\n` +
+    `   \u00b1${Number(t.sigma).toFixed(2)}\u00b0  q ${Number(t.q).toFixed(0)}  frame ${Number(t.frame_ms).toFixed(0)} ms  ratio ${Number(t.ratio).toFixed(1)}\n` +
+    `   ${t.updates} frames, ${t.rejects} rejected`);
+  el.textContent = rows.length ? rows.join('\n') : 'No track yet (Tracking off, or no signal above the gate)';
 }
 
 function updateMusicNumSnapshots(val) {

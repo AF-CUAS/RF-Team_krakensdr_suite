@@ -602,7 +602,14 @@ string MessageBuilders::build_doa_track_message() {
              << ",\"ratio\":" << s.ratio
              << ",\"age_ms\":" << s.age_ms
              << ",\"updates\":" << s.updates
-             << ",\"rejects\":" << s.rejects << '}';
+             << ",\"rejects\":" << s.rejects
+             << setprecision(2)
+             << ",\"innov\":" << s.innov_deg
+             << ",\"nis\":" << s.nis
+             << setprecision(0)
+             << ",\"frame_ms\":" << s.frame_ms
+             << setprecision(1)
+             << ",\"q\":" << s.q << '}';
     }
     json << "]}}";
     return json.str();

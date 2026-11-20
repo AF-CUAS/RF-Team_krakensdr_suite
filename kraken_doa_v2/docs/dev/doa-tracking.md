@@ -15,14 +15,19 @@ headless-browser check). Committed to main as 82a08c6 (2026-11-20):
 `decimator_manager.hpp`, `message_builders.hpp/.cpp`, `control_handler.cpp`,
 `settings_store.cpp`, `networking/data_receiver.cpp`,
 `networking/websocket_server.cpp`, `kraken_doa.html`, `tools/doa_track/`
-(new), this file and the CLAUDE.md / README.md index rows. Not done:
+(new), this file and the CLAUDE.md / README.md index rows. Then the
+field tuning (see "Tuning in the field"): every filter constant a runtime
+parameter (`DOA_TRACK_PARAMS:`), the MUSIC box's Tuning panel, NIS / innovation
+diagnostics. Not done:
 a Windows (MinGW) syntax check (no MinGW on the machine it was written
 on), real hardware, really weak signals, multipath, several emitters.
 
 Next steps (none started):
 - a real-hardware test: the drone at 915.1 MHz, Tracking Normal, Averaging
   off, a UCA radius a little under 140 mm (the page warns at 140 mm: 0.502
-  lambda spacing at 915 MHz), the VFO as wide as the signal
+  lambda spacing at 915 MHz), the VFO as wide as the signal; tune with the
+  Tuning panel and log the lines that work (then make the best one the
+  default in PARAM_SPECS + DTP_SPECS, or a profile)
 - the track in the DoA logger, the web mapper, the 8081 page, drive mode
   (they still use the raw MUSIC peak)
 - elevation for close / high drones (UCA steering assumes 0 deg)
@@ -43,7 +48,10 @@ WSL Ubuntu, no sudo needed):
    from `summarize.py`, compare with the table below)
 4. page: `jscheck.js` (parse), then `stack.sh bursty30 25` in the
    background and `python browser_check.py` (Windows Python + Edge) -
-   read the screenshots in `tools/doa_track/results/shots/`
+   read the screenshots in `tools/doa_track/results/shots/`; for the
+   Tuning panel `stack.sh pass100 90` and `python browser_tune_check.py`
+   (17 PASS / FAIL steps: real clicks and typing, a bad and a good pasted
+   line, the reload replay, Defaults)
 Never run git from WSL in the Windows checkout (no autocrlf there: it sees
 every file as changed, and a stash / checkout rewrites them as LF).
 
@@ -64,7 +72,7 @@ constant-angular-velocity Kalman filter on the MUSIC peak:
   and are skipped. Measurement sigma = clamp(6 / sqrt(ratio - 1), 0.5, 15)
   deg (bearing error ~ 1/sqrt(SNR); a heuristic, not measured on hardware)
 - outliers: an innovation beyond max(8 deg, 4 sigma) is rejected;
-  `REACQUIRE_MISSES` (4) rejects in a row restart the track at the new
+  `reacquire` (4) rejects in a row restart the track at the new
   bearing (the emitter really jumped, or another one took over)
 - states: acquiring (until 3 accepted frames), tracking, coasting (no
   frame for max(300 ms, 3 x the in-burst frame spacing)), lost (no frame
@@ -86,8 +94,18 @@ tracker locks itself; the pipeline thread updates, the uWS loop reads.
 - `DOA_TRACK:off|slow|normal|fast` (persisted `doa_track`, replayed;
   default off - nothing changes for existing setups)
 - `DOA_TRACK_GATE:<1.2..100>` (persisted `doa_track_gate`, replayed)
+- `DOA_TRACK_PARAMS:key=value,...` (any subset, any order) or
+  `DOA_TRACK_PARAMS:default` (persisted `doa_track_params`, replayed): the
+  filter's tuning, `PARAM_SPECS` in bearing_tracker.hpp. All or nothing - an
+  unknown key or a non-number is a `CommandRejected` (the AI assistant's
+  tools see the reason; a browser's is only logged, so the page checks a
+  pasted line itself). Values are clamped to the ranges; the applied (saved,
+  synced) form is the full set, `q=0.0,gate_sigma=4.0,...`. It applies to
+  the running tracks at once (each update / snapshot copies the parameters);
+  no reset
 - `{"doa_track":{"profile","gate","tracks":[{"id","state","az","rate",
-  "sigma","meas","ratio","age_ms","updates","rejects"}]}}` on the DoA
+  "sigma","meas","ratio","age_ms","updates","rejects","innov","nis",
+  "frame_ms","q"}]}}` on the DoA
   topic at 10 Hz (its own timer in `websocket_server.cpp`), predicted to
   the send time; nothing while the tracker or DoA is off. `az`, `meas` and
   `rate` are MUSIC azimuth (counter-clockwise, array offset applied); the
@@ -101,6 +119,42 @@ draws the track in amber (`--warn` #e3a842): a +-2 sigma wedge (capped at
 45 deg) and a line to the rim, dashed while coasting, grey (`--t5`) once
 lost; a track not refreshed for 1.5 s is not drawn. The VFO card gets a
 Track line (bearing, rate; the title has state, sigma, age, counts).
+
+Tuning (MUSIC box, Show / Hide; remembered per browser, `kraken_dtp_open`):
+one row per parameter built from `DTP_SPECS` (mirrors PARAM_SPECS: keep the
+keys and ranges alike), each sending `DOA_TRACK_PARAMS:<key>=<value>` on
+change; the full line (copy it to log a setting, paste one and Apply - the
+page refuses unknown keys with a message), Copy, Defaults; the live
+diagnostics of every track (state, innovation, NIS, sigma, q in use, frame
+spacing, ratio, frames / rejects). Inputs follow the receiver's sync (not
+the one being edited).
+
+## Tuning in the field
+
+| Parameter | Default | What it does |
+|---|---|---|
+| q | 0 (= the profile: slow 10, normal 100, fast 625) | process noise, deg^2/s^3: how fast the rate may change |
+| gate_sigma / gate_floor | 4 sigma / 8 deg | outlier gate: max(floor, gate_sigma x sqrt(S)) |
+| reacquire | 4 | rejects in a row -> a new track at the new bearing |
+| confirm | 3 | frames before acquiring -> tracking |
+| init_rate | 30 deg/s | a new track's rate sigma |
+| max_rate | 180 deg/s | rate clamp |
+| coast_ms / lost_ms | 300 / 5000 | -> coasting (or 3 frame spacings) / -> lost |
+| meas_k, meas_min, meas_max | 6, 0.5, 15 deg | measurement sigma = clamp(k / sqrt(ratio - 1)) |
+| shrink | 1 | coasting trusts the rate only as far as it is known |
+
+Reading the diagnostics:
+- NIS (normalised innovation squared, an average of y^2 / S) should sit
+  near 1. Well above (3+): the filter is surprised - the target manoeuvres
+  more than q allows, or the bearings are noisier than meas_k says: raise q
+  or meas_k. Well below (0.2-): too cautious - lower meas_k / meas_min
+  (smoother and quicker), or q. On the fake heimdall's clean carrier NIS
+  is ~0: its bearings are far better than the meas_min floor of 0.5 deg.
+- Many rejects while the target is clearly there: the gate is too tight
+  (raise gate_sigma / gate_floor) or q too low. A track that jumps to
+  reflections: tighten the gate, raise reacquire.
+- Bursty signal, the coasting track overshoots: shrink on, lower q; it lags
+  behind: raise q (and check frame spacing - narrow VFOs give slow frames).
 
 Map (the DF section's drawing, `rdfDrawTracks`): layer **Track**
 (`mapState.rdfTrack`, Layers popover under Direction finding, on by

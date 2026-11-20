@@ -103,12 +103,12 @@ int main() {
         s = t.snapshot(1000 + 19 * 50 + 6000);
         check("re-acquires a new bearing after LOST", s.state == State::ACQUIRING && std::fabs(wrap180(s.bearing_deg - 200.0)) < 0.5);
     }
-    // 5. jump: emitter switched -> re-acquired after REACQUIRE_MISSES
+    // 5. jump: emitter switched -> re-acquired after `reacquire` rejects
     {
         BearingTracker t;
         int64_t ms = 0;
         for (int i = 0; i < 20; i++, ms += 50) t.update(ms + 1, 10.0f, 20.0f);
-        for (int i = 0; i < REACQUIRE_MISSES; i++, ms += 50) t.update(ms + 1, 180.0f, 20.0f);
+        for (int i = 0; i < static_cast<int>(params()[P_REACQUIRE]); i++, ms += 50) t.update(ms + 1, 180.0f, 20.0f);
         Snapshot s = t.snapshot(ms);
         check("jump to a new bearing re-acquires", std::fabs(wrap180(s.bearing_deg - 180.0)) < 2.0);
     }
@@ -132,6 +132,53 @@ int main() {
     }
     Profile p;
     check("parse_profile", parse_profile("FAST", p) && p == Profile::FAST && parse_profile("off", p) && !parse_profile("quick", p));
+
+    // 8. the runtime parameters (DOA_TRACK_PARAMS:)
+    {
+        std::string err;
+        check("params: defaults string", params_string(default_params()).rfind("q=0.0,gate_sigma=4.0,", 0) == 0);
+        check("params: a subset applies", apply_params("q=250, gate_floor = 12", &err) && params()[P_Q] == 250 &&
+              params()[P_GATE_FLOOR] == 12 && params()[P_GATE_SIGMA] == 4);
+        check("params: unknown key refused, nothing changed", !apply_params("q=1,bogus=3", &err) && params()[P_Q] == 250 &&
+              err.find("bogus") != std::string::npos);
+        check("params: not a number refused", !apply_params("q=abc", &err) && !apply_params("q=", &err) &&
+              !apply_params("q=1e999", &err) && !apply_params("q", &err));
+        check("params: clamped and rounded", apply_params("gate_sigma=0.1,reacquire=2.6,lost_ms=1e9", &err) &&
+              params()[P_GATE_SIGMA] == 1 && params()[P_REACQUIRE] == 3 && params()[P_LOST_MS] == 120000);
+        check("params: meas_max kept >= meas_min", apply_params("meas_min=20,meas_max=5", &err) &&
+              params()[P_MEAS_MAX] == 20);
+        check("params: empty = no change", apply_params("", &err) && params()[P_Q] == 250);
+        check("params: default resets", apply_params("default", &err) && params() == default_params());
+        // the round trip: the applied string parses back to the same values
+        apply_params("q=12.5,meas_k=3.25,shrink=0", &err);
+        const Params a = params();
+        apply_params("default", &err);
+        apply_params(params_string(a), &err);
+        check("params: string round trip", params() == a);
+        apply_params("default", &err);
+    }
+    // 9. the parameters change the filter live: q overrides the profile; lost_ms; reacquire
+    {
+        std::string err;
+        g_profile = static_cast<int>(Profile::SLOW);
+        apply_params("q=5000", &err);
+        BearingTracker t;
+        for (int i = 0; i < 10; i++) t.update(1000 + i * 50, 90.0f, 20.0f);
+        check("q override in use (snapshot reports it)", t.snapshot(1000 + 9 * 50).q == 5000);
+        apply_params("q=0", &err);
+        check("q=0 -> the profile's", t.snapshot(1000 + 9 * 50).q == 10);
+        apply_params("lost_ms=1000", &err);
+        check("lost_ms applies live", t.snapshot(1000 + 9 * 50 + 1500).state == State::LOST);
+        apply_params("lost_ms=5000", &err);
+        check("...and back", t.snapshot(1000 + 9 * 50 + 1500).state == State::COASTING);
+        apply_params("reacquire=1", &err);
+        t.update(1000 + 10 * 50, 250.0f, 20.0f);
+        check("reacquire=1: one outlier restarts the track",
+              std::fabs(wrap180(t.snapshot(1000 + 10 * 50).bearing_deg - 250)) < 0.5);
+        const Snapshot s = t.snapshot(1000 + 10 * 50);
+        check("diagnostics present", std::isfinite(s.nis) && std::isfinite(s.innov_deg) && s.frame_ms >= 0);
+        apply_params("default", &err);
+    }
 
     std::printf("%s\n", fails ? "SOME FAILED" : "ALL PASSED");
     return fails ? 1 : 0;
