@@ -10,8 +10,8 @@ Last worked on 2026-11-20. Done: the tracker (receiver), `DOA_TRACK:` /
 `DOA_TRACK_GATE:`, `{"doa_track"}` at 10 Hz, the DoA plot's track and
 the VFO card's Track line, the map's Track layer, these docs, and the
 tests below (offline, the real pipeline against a fake heimdall, a
-headless-browser check). NOT committed yet - the work is in the working
-tree: `include/signal_processing/bearing_tracker.hpp` (new),
+headless-browser check). Committed to main as 82a08c6 (2026-11-20):
+`include/signal_processing/bearing_tracker.hpp` (new),
 `decimator_manager.hpp`, `message_builders.hpp/.cpp`, `control_handler.cpp`,
 `settings_store.cpp`, `networking/data_receiver.cpp`,
 `networking/websocket_server.cpp`, `kraken_doa.html`, `tools/doa_track/`
