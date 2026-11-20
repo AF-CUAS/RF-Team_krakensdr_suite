@@ -573,6 +573,41 @@ string MessageBuilders::build_multi_doa_message() {
     return msg.to_string();
 }
 
+string MessageBuilders::build_doa_track_message() {
+    using namespace doatrack;
+    const Profile prof = static_cast<Profile>(g_profile.load(std::memory_order_relaxed));
+    if (prof == Profile::OFF || !doa_enabled.load()) return string();
+    const int64_t now = chrono::duration_cast<chrono::milliseconds>(
+        chrono::system_clock::now().time_since_epoch()).count();
+    ostringstream json;
+    json << fixed;
+    json << "{\"doa_track\":{\"profile\":\"" << profile_name(prof) << "\""
+         << ",\"gate\":" << setprecision(1) << g_min_ratio.load(std::memory_order_relaxed)
+         << ",\"tracks\":[";
+    bool first = true;
+    for (const auto& d : decimator_manager.getAllDecimators()) {
+        if (!d || d->being_deleted.load(std::memory_order_relaxed)) continue;
+        const Snapshot s = d->bearing_tracker.snapshot(now);
+        if (s.state == State::IDLE) continue;
+        if (!first) json << ',';
+        first = false;
+        json << "{\"id\":" << d->id
+             << ",\"state\":\"" << state_name(s.state) << "\""
+             << setprecision(2)
+             << ",\"az\":" << s.bearing_deg
+             << ",\"rate\":" << s.rate_dps
+             << ",\"sigma\":" << s.sigma_deg
+             << ",\"meas\":" << s.meas_deg
+             << setprecision(1)
+             << ",\"ratio\":" << s.ratio
+             << ",\"age_ms\":" << s.age_ms
+             << ",\"updates\":" << s.updates
+             << ",\"rejects\":" << s.rejects << '}';
+    }
+    json << "]}}";
+    return json.str();
+}
+
 string MessageBuilders::build_system_status_message() {
     extern ScannerManager scanner_manager;
 

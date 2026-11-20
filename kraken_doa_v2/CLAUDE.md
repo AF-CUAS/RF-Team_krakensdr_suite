@@ -59,7 +59,10 @@ make -C plugins PLUGIN=<id>    # one plugin (a plugin that fails to compile only
 - `tools/`: offline benches and validators (`decim_bench.cpp`,
   `digi_test.cpp`, `replay_validate.mjs`, `pathloss_validate.mjs`,
   `range_validate.mjs`, `rdf_sim.cpp`, `fast_log_test.cpp`,
-  `theme_palette.py`: the page's colour palette and its check).
+  `theme_palette.py`: the page's colour palette and its check),
+  `doa_track/` (a fake heimdall streaming a moving emitter, the WSL test
+  build for a Windows machine, the bearing-tracker test matrix and browser
+  check: `docs/dev/doa-tracking.md` "Status and how to resume").
 
 ## Threads and the command path
 
@@ -223,6 +226,7 @@ the job's scratch directory (not committed). The established setup:
 | Decoder plugins (process model, registry); digital voice (codecs, incl. DAB+'s AAC library) | `decoder-plugins.md`, `digital-voice.md` |
 | Digital squelch; fixed-frequency decoders | `digital-squelch.md`, `fixed-frequency-decoders.md` |
 | DoA per talker (ID separation, packets, covariances) | `doa-per-talker.md` |
+| Bearing tracker for moving emitters (Kalman per VFO, coasting between bursts, `DOA_TRACK:`, `{"doa_track"}`, the map's Track layer); its status, next steps and how to re-run its tests | `doa-tracking.md` |
 | Plugins: ACARS, VDL Mode 2, ADS-B, AIS, ISM, LoRa, Pagers, RDS, DAB / DAB+, Radiosonde, FLARM / OGN, Digital TV, LTE / 5G NR, Pulse radar, 1030 MHz, UAT, DME, ILS / VOR, Analog FM IDs, 406 MHz, 121.5 MHz beacons, Wildlife | `plugin-acars.md`, `plugin-vdl2.md`, `plugin-adsb.md`, `plugin-ais.md`, `plugin-ism.md`, `plugin-lora.md`, `plugin-pagers.md`, `plugin-rds.md`, `plugin-dab.md`, `plugin-radiosonde.md`, `plugin-flarm.md`, `plugin-dtv.md`, `plugin-cells.md`, `plugin-radar.md`, `plugin-ssr1030.md`, `plugin-uat.md`, `plugin-dme.md`, `plugin-ils.md`, `plugin-analog-id.md`, `plugin-beacon406.md`, `plugin-beacon121.md`, `plugin-wildlife.md` |
 | Analog TV (PAL/NTSC luma + display); TEMPEST screen reconstruction (auto/manual video-mode detection, display, source DoA); deep-reconstruction plan | `plugin-analogtv.md`, `plugin-tempest.md`, `tempest-deep-plan.md` |
 | Plugin video display channel (`host.video_frame`, the per-VFO canvas) | `plugins/SDK.md` *Video frames* |

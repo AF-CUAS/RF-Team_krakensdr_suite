@@ -1046,6 +1046,16 @@ void WebSocketServer::web_server_main() {
                     }
                 }, 200, 200);
 
+                // Bearing tracks (bearing_tracker.hpp) - 10 Hz, so a fast
+                // mover's bearing moves smoothly on the page; small JSON, and
+                // nothing at all while the tracker is off
+                struct us_timer_t* track_timer = us_create_timer(native_loop, 0, 0);
+                us_timer_set(track_timer, [](struct us_timer_t* /*timer*/) {
+                    if (!global_ssl_app) return;
+                    auto m = MessageBuilders::build_doa_track_message();
+                    if (!m.empty()) global_ssl_app->publish(TOPIC_DOA, m, uWS::TEXT, false);
+                }, 100, 100);
+
                 // Digital decoder status (VFOs with a decoder on) - 4 Hz
                 struct us_timer_t* digital_timer = us_create_timer(native_loop, 0, 0);
                 us_timer_set(digital_timer, [](struct us_timer_t* /*timer*/) {

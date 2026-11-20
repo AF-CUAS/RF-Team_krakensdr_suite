@@ -353,6 +353,7 @@ static bool is_replayed_command(string_view msg) {
         "TOPOLOGY:", "CUSTOM_POSITIONS:", "ARRAY_LAYOUT:", "RADIUS:", "SPACING:", "ELEVATION_RESOLUTION:",
         "MUSIC_NUM_SNAPSHOTS:", "MUSIC_SNAPSHOT_LENGTH:",
         "MUSIC_FB_AVERAGING:", "MUSIC_COVARIANCE_ALPHA:", "EDGE_CLIP:",
+        "DOA_TRACK:", "DOA_TRACK_GATE:",   // bearing tracker
         "MUSIC_SIGNAL_SOURCES:", "ULA_MODE:", "CUSTOM_MODE:", "ARRAY_OFFSET:",
         // Beamforming settings (on/off itself rides system_status; the mode
         // only does while beamforming is on)
@@ -1662,6 +1663,28 @@ void ControlHandler::handle_message_impl(string_view message) {
         stringstream json;
         json << "{\"music_covariance_alpha\":{\"alpha\":" << alpha << "}}";
         broadcast(json.str());
+    }
+    else if (message.starts_with("DOA_TRACK_GATE:")) {
+        // Bearing tracker: eigenvalue-ratio gate (linear; ~1 = noise only).
+        // Frames below it carry no signal and are not tracked
+        const float r = std::clamp(parse_float(message, 15), doatrack::MIN_RATIO_LO, doatrack::MIN_RATIO_HI);
+        doatrack::g_min_ratio.store(r, std::memory_order_relaxed);
+        set_applied("DOA_TRACK_GATE:", r, 1);
+    }
+    else if (message.starts_with("DOA_TRACK:")) {
+        // Bearing tracker (bearing_tracker.hpp, docs/dev/doa-tracking.md):
+        // off | slow | normal | fast - how quickly the bearing rate may change.
+        // A change starts every VFO's track afresh; the tracks go out as
+        // {"doa_track":...} (MessageBuilders::build_doa_track_message)
+        const string v(message.substr(10));
+        doatrack::Profile p;
+        if (!doatrack::parse_profile(v.c_str(), p))
+            throw CommandRejected("format: DOA_TRACK:off|slow|normal|fast");
+        doatrack::g_profile.store(static_cast<int>(p), std::memory_order_relaxed);
+        for (auto& d : decimator_manager.getAllDecimators())
+            if (d) d->bearing_tracker.reset();
+        g_applied_cmd = string("DOA_TRACK:") + doatrack::profile_name(p);
+        cout << "DoA bearing tracker: " << doatrack::profile_name(p) << endl;
     }
     else if (message.starts_with("MUSIC_SIGNAL_SOURCES:")) {
         // Expected number of signal sources (signal-subspace dimension).

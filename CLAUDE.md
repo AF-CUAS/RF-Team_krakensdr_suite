@@ -178,7 +178,9 @@ the end of `kraken_doa_v2/CLAUDE.md`). Decoders also have
 `kraken_doa_v2/plugins/<id>/README.md`.
 
 - Spectrum: `spectrum-views.md` (`FFT_VIEW:`, message type 7),
-  `noise-floor.md`, `bearing-spectrum.md` (colours by DoA, type 9)
+  `noise-floor.md`, `bearing-spectrum.md` (colours by DoA, type 9),
+  `doa-tracking.md` (bearing tracker for moving emitters - a drone at
+  915.1 MHz; in progress: its "Status and how to resume" section)
 - VFOs: `vfo-bandwidth.md` (any width 1 kHz - 2.4 MHz, the decimator),
   `vfo-audio.md`, `operating-modes.md` (also VFO cards, the tuning step,
   zoom), `sidebar.md` (the boxes: move, collapse, the remembered layout;
@@ -342,6 +344,10 @@ the end of `kraken_doa_v2/CLAUDE.md`). Decoders also have
   tuning times out with -7) and coalesces queued 8092 retunes.
 - Claude Code has no sandbox on Windows: the AI assistant gets no shell
   there, and a plugin it changed doesn't run until trusted.
+- Linux builds and tests from a Windows checkout: WSL
+  (`kraken_doa_v2/tools/doa_track/wsl_setup.sh`, no sudo needed). Never
+  run git from WSL in the Windows checkout: it has no autocrlf, sees every
+  file as changed, and a stash / checkout rewrites them all as LF.
 
 **macOS** (`docs/dev/macos.md`): the same Makefiles (`MACOS`), Homebrew in
 place of apt, compatible with Apple clang 14 (no `-fcx-fortran-rules` -

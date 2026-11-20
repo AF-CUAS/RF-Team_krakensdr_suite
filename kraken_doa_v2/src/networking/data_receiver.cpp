@@ -20,6 +20,7 @@
 #include "signal_processing/beamformer.hpp"
 #include "signal_processing/noise_floor.hpp"
 #include "signal_processing/bin_doa.hpp"
+#include "signal_processing/bearing_tracker.hpp"
 #include "decimator_manager.hpp"
 #include "doa_logger.hpp"
 #include "voice2text.hpp"
@@ -99,6 +100,21 @@ static inline bool doa_retune_hold_active() {
     if (scanner_manager.getPhaseState() == PHASE_STATE_WAITING_FOR_STABILITY) return true;
     const int64_t t = g_last_retune_complete_ms.load(std::memory_order_relaxed);
     return t != 0 && (steady_now_ms() - t) < RETUNE_DOA_MIN_HOLD_MS;
+}
+
+// Bearing tracker (bearing_tracker.hpp): offer the VFO's latest published
+// MUSIC frame - from this packet's MUSIC pass or the Digital squelch's
+// confirmed-samples publish - deduplicated by its stamp. A retune or VFO
+// move (stale result) ends the track: the old bearing is another emitter's.
+static void update_bearing_tracker(DecimatorManager::DecimatorInstance& inst) {
+    if (doatrack::g_profile.load(std::memory_order_relaxed) == 0) return;
+    MUSICProcessor* mp = inst.music_processor.get();
+    if (!mp) return;
+    if (mp->isResultStale()) { inst.bearing_tracker.reset(); return; }
+    const int64_t stamp = mp->getResultStampMs();
+    if (stamp <= 0 || !inst.bearing_tracker.isNew(stamp)) return;
+    const float az = mp->getPeakAngleWithConfidence().first;
+    inst.bearing_tracker.update(stamp, az, mp->getEigenvalueRatio());
 }
 
 
@@ -906,6 +922,9 @@ void DataReceiver::decimation_processor_thread() {
                             inst->talker_doa->wants_blocks() &&
                             !inst->being_deleted.load(std::memory_order_relaxed))
                             inst->talker_doa->add_block(result.decimated_data);
+
+                        if (!wideband_enabled && !inst->being_deleted.load(std::memory_order_relaxed))
+                            update_bearing_tracker(*inst);
 
                     } catch (const std::exception& e) {
                         cerr << "Pipeline " << inst->id << " error: " << e.what() << endl;

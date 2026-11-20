@@ -67,6 +67,9 @@ public:
                                            double* point_step_hz = nullptr, SpectrumViewCut* cut = nullptr);
     static std::string build_audio_message();
     static std::string build_multi_doa_message();
+    // {"doa_track":{...}}: every VFO's bearing track predicted to now;
+    // empty while the tracker is off (bearing_tracker.hpp)
+    static std::string build_doa_track_message();
     static std::string build_system_status_message();
     // Beamformed FFT overlay: a decimator's spectrum (false if it has no valid
     // beamformed data - beamforming off, or none produced yet), then type 4

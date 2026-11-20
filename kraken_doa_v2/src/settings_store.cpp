@@ -98,6 +98,10 @@ bool write_file_atomic(const char* path, const std::string& data) {
         {"fb_averaging",             "MUSIC_FB_AVERAGING:",       VType::BOOL,   "0"},
         // Temporal covariance smoothing: new-frame weight, 1.0 = off
         {"covariance_alpha",         "MUSIC_COVARIANCE_ALPHA:",   VType::NUMBER, "1.00"},
+        // Bearing tracker (docs/dev/doa-tracking.md): off|slow|normal|fast,
+        // and its eigenvalue-ratio gate
+        {"doa_track",                "DOA_TRACK:",                VType::STRING, "off"},
+        {"doa_track_gate",           "DOA_TRACK_GATE:",           VType::NUMBER, "3.0"},
         {"num_snapshots",            "MUSIC_NUM_SNAPSHOTS:",      VType::NUMBER, "32"},
         {"snapshot_length",          "MUSIC_SNAPSHOT_LENGTH:",    VType::NUMBER, "256"},
         // Signal-subspace dimension; 0 = automatic (eigenvalue threshold)

@@ -10,6 +10,7 @@
 #include "signal_processing/fm_demodulator.hpp"
 #include "signal_processing/beamformer.hpp"
 #include "signal_processing/beamformed_fft.hpp"
+#include "signal_processing/bearing_tracker.hpp"
 #include "digital/digital_decoder.hpp"
 #include "talker_doa.hpp"
 
@@ -73,6 +74,10 @@ public:
         // DoA per talker (talker_doa.hpp): this VFO's MUSIC frames (frame tap)
         // cut by its digital decoder's talker spans. Never replaced.
         std::shared_ptr<tdoa::TalkerDoa> talker_doa;
+        // Bearing tracker (bearing_tracker.hpp, docs/dev/doa-tracking.md):
+        // fed each newly published MUSIC frame by the pipeline, read by the
+        // doa_track broadcast on the uWS loop (it locks itself)
+        doatrack::BearingTracker bearing_tracker;
 
         DecimatorInstance(int _id)
             : id(_id)

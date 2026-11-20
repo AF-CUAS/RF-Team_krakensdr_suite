@@ -2487,6 +2487,20 @@ body.drive.drive-day .drive-hud,body.drive.drive-day .ui-dlg-bg {
             <span class="sv" id="music-cov-avg-val">Off</span>
           </div>
           <div class="ctrl-row">
+            <label>Tracking<span class="help" tabindex="0" role="button" aria-label="Help">?<span class="tip">Follows a moving emitter: a filtered bearing and its rate (deg/s) per VFO, drawn in amber on the DoA plot, that keeps predicting through gaps between bursts (dashed while coasting, grey once lost after 5 s). Slow: a walker or a distant car. Normal: most targets, drones included, and bursty signals. Fast: only if the track lags behind sharp manoeuvres. Keep Averaging off with it.</span></span></label>
+            <select id="doa-track" onchange="updateDoaTrack(this.value)" style="width:70px">
+              <option value="off">Off</option>
+              <option value="slow">Slow</option>
+              <option value="normal">Normal</option>
+              <option value="fast">Fast</option>
+            </select>
+          </div>
+          <div class="ctrl-row">
+            <label>Track gate<span class="help" tabindex="0" role="button" aria-label="Help">?<span class="tip">Signal threshold for the tracker: the MUSIC eigenvalue ratio (about 1 with noise only) a frame needs to update the track. Raise it if the track follows noise between transmissions; lower it for a weak signal.</span></span></label>
+            <input type="range" class="slider" id="doa-track-gate" min="1.5" max="20" value="3" step="0.5" oninput="updateDoaTrackGate(this.value)">
+            <span class="sv" id="doa-track-gate-val">3.0</span>
+          </div>
+          <div class="ctrl-row">
             <label>Sources<span class="help" tabindex="0" role="button" aria-label="Help">?<span class="tip">Expected number of emitters to resolve. Auto counts eigenvalues standing 6 dB above the noise floor AND within 12 dB of the strongest signal - leakage from calibration residuals and multipath is ignored.</span></span></label>
             <select id="music-signal-sources" onchange="updateMusicSignalSources(this.value)" style="width:70px">
               <option value="0">Auto</option>
@@ -4135,6 +4149,8 @@ let ws,fftPlot,audioEngine,activeChannel=0,currentAveraging=85,
     isScrollDragging=false,scrollDragStartX=0,scrollDragStartY=0,scrollDragStartFreq=0,scrollDragSavedBoxes=null,scrollDragLock=false,scrollDragMoved=false,
     lastFreqSendTime=0,freqSendThrottleMs=50,
     doaPlots={},widebandEnabled=false,fbAveragingEnabled=false,
+    doaTrackProfile='off',  // bearing tracker (DOA_TRACK:); each plot holds its VFO's track (PolarPlot.track)
+    doaTracks={}, doaTrackHist={},  // VFO id -> its latest track / [[performance.now(), az], ...] (the map's Track layer)
     scannerConfig=null,scannerRunning=false,scannerFileName='scanner.json',scannerState='IDLE',showScannerSquelch=false,
     channelBeforeWideband=null,  // channel saved when THIS browser enabled wideband (null = didn't)
     activeNumElements=5,  // Synced from server (set via -n flag on heimdall)
@@ -4206,7 +4222,7 @@ const MAP_TRAIL_BALLOON_MAX = 4000, MAP_TRAIL_BALLOON_S = 4 * 3600;
 // DoA / Map / Both) is shown; tab = what it shows in coherent mode.
 const mapState = (() => {
   const d = {on: false, pane: true, tab: 'doa', w: 0, layer: 'street', z: 0, mx: 0.5, my: 0.5, trails: true, masts: false,
-             rdfVfo: 'all', rdfTid: '', rdfLobe: true, rdfLines: true, rdfHeat: true, rdfOpen: true,
+             rdfVfo: 'all', rdfTid: '', rdfLobe: true, rdfLines: true, rdfHeat: true, rdfTrack: true, rdfOpen: true,
              vs: false, vsOpen: true, srch: false};
   try {
     const st = JSON.parse(localStorage.getItem('kraken_map') || '{}');
@@ -6253,6 +6269,39 @@ class PolarPlot {
       ctx.arc(x,y,6,0,2*Math.PI);
       ctx.fill();
     }
+    this.drawTrack();
+  }
+
+  // The bearing tracker's track (dtOnMessage): a +-2 sigma wedge and a line
+  // to the rim, amber; dashed while coasting, grey once lost. A track not
+  // refreshed for 1.5 s (receiver gone, tracker off) is not drawn.
+  drawTrack() {
+    const t=this.track;
+    if(!t || !Number.isFinite(t.az) || performance.now()-t.at>1500) return;
+    const ctx=this.ctx,cx=this.cx,cy=this.cy,r=this.r;
+    const col=t.state==='lost'?'#7f8995':'#e3a842';
+    const half=Math.min(45,Math.max(1,2*(Number.isFinite(t.sigma)?t.sigma:0)));
+    ctx.save();
+    ctx.fillStyle=t.state==='lost'?'rgba(127,137,149,0.15)':'rgba(227,168,66,0.18)';
+    ctx.beginPath();
+    ctx.moveTo(cx,cy);
+    for(let a=-half;a<=half+1e-9;a+=Math.max(0.5,half/12)) { const [x,y]=this.azPos(t.az+a,r); ctx.lineTo(x,y); }
+    ctx.closePath();
+    ctx.fill();
+    const [ex,ey]=this.azPos(t.az,r);
+    ctx.strokeStyle=col;
+    ctx.lineWidth=2;
+    if(t.state==='coasting'||t.state==='lost') ctx.setLineDash([5,4]);
+    ctx.beginPath();
+    ctx.moveTo(cx,cy);
+    ctx.lineTo(ex,ey);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle=col;
+    ctx.beginPath();
+    ctx.arc(ex,ey,4,0,2*Math.PI);
+    ctx.fill();
+    ctx.restore();
   }
 }
 
@@ -6845,6 +6894,13 @@ function applySyncCmdInner(cmd) {
   }
   else if ((v = arg('MUSIC_FB_AVERAGING:')) !== null) {
     if ((v === '1') !== fbAveragingEnabled) toggleFBAveraging();
+  }
+  else if ((v = arg('DOA_TRACK:')) !== null) {
+    doaTrackApplyProfile(v);
+  }
+  else if ((v = arg('DOA_TRACK_GATE:')) !== null) {
+    const el = $id('doa-track-gate');
+    if (idle(el) && parseFloat(el.value) !== parseFloat(v)) { el.value = parseFloat(v); $id('doa-track-gate-val').textContent = parseFloat(v).toFixed(1); }
   }
   else if ((v = arg('MUSIC_COVARIANCE_ALPHA:')) !== null) {
     // alpha (new-frame weight) 1.00..0.05 -> slider 0..95% smoothing
@@ -9497,6 +9553,59 @@ function updateCovarianceAveraging(val) {
   send('MUSIC_COVARIANCE_ALPHA:' + alpha.toFixed(2));
 }
 
+// Bearing tracker (docs/dev/doa-tracking.md): the receiver tracks, the page draws
+function updateDoaTrack(v) { send('DOA_TRACK:' + v); }
+function updateDoaTrackGate(val) {
+  $id('doa-track-gate-val').textContent = parseFloat(val).toFixed(1);
+  send('DOA_TRACK_GATE:' + parseFloat(val).toFixed(1));
+}
+function doaTrackApplyProfile(v) {
+  doaTrackProfile = v;
+  const el = $id('doa-track');
+  if (el && el.value !== v) el.value = v;
+  if (v === 'off') {
+    for (const id in doaPlots) { doaPlots[id].track = null; doaPlots[id].draw(); doaTrackReadout(id, null); }
+    doaTracks = {}; doaTrackHist = {};
+    if (typeof mapDraw === 'function') mapDraw();
+  }
+}
+// the VFO card's Track line: bearing, rate, state
+function doaTrackReadout(id, t) {
+  const row = $id('dtr-' + id), el = $id('dtk-' + id), p = doaPlots[id];
+  if (!row || !el) return;
+  if (!t) { row.style.display = 'none'; return; }
+  row.style.display = '';
+  // rate in the plot's convention: compass bearings run clockwise, MUSIC azimuth counter-clockwise
+  const rate = p && p.convention === 'compass' ? -t.rate : t.rate;
+  const ang = p ? p.displayAngle(t.az) : t.az;
+  el.textContent = (ang >= 359.95 ? 0 : ang).toFixed(1) + '\u00b0 ' + (rate >= 0 ? '+' : '') + rate.toFixed(1) + '\u00b0/s';
+  el.title = t.state + ' - \u00b1' + t.sigma.toFixed(1) + '\u00b0, last frame ' + (t.age_ms / 1000).toFixed(1) + ' s ago, ' +
+             t.updates + ' frames, ' + t.rejects + ' rejected';
+  el.style.color = t.state === 'lost' ? '#7f8995' : t.state === 'coasting' ? '#f4c170' : '#e3a842';
+}
+function dtOnMessage(m) {
+  if (m.profile && m.profile !== doaTrackProfile) doaTrackApplyProfile(m.profile);
+  const seen = new Set();
+  for (const t of (m.tracks || [])) {
+    const p = doaPlots[t.id];
+    if (!p || !Number.isFinite(t.az)) continue;
+    seen.add(String(t.id));
+    p.track = Object.assign({at: performance.now()}, t);
+    p.draw();
+    doaTrackReadout(t.id, t);
+    doaTracks[t.id] = p.track;
+    // the map's fading history: a bearing every 0.5 s while not lost, the last 10 s
+    const hst = doaTrackHist[t.id] || (doaTrackHist[t.id] = []), now = p.track.at;
+    if (t.state !== 'lost' && (!hst.length || now - hst[hst.length - 1][0] >= 500)) hst.push([now, t.az]);
+    while (hst.length && now - hst[0][0] > 10000) hst.shift();
+  }
+  for (const id in doaPlots) if (!seen.has(String(id)) && doaPlots[id].track) {
+    doaPlots[id].track = null; doaPlots[id].draw(); doaTrackReadout(id, null);
+  }
+  for (const id in doaTracks) if (!seen.has(String(id))) { delete doaTracks[id]; delete doaTrackHist[id]; }
+  if (typeof mapDraw === 'function') mapDraw();
+}
+
 function updateMusicNumSnapshots(val) {
   $id('music-num-snapshots-val').textContent = val;
   send('MUSIC_NUM_SNAPSHOTS:' + val);
@@ -9952,6 +10061,9 @@ function createDoaDisplay(decimatorId) {
     </div>
     <div class="di">
       MUSIC: <span class="peak" id="dpk-${decimatorId}">---°</span>
+    </div>
+    <div class="di" id="dtr-${decimatorId}" style="display:none">
+      Track: <span class="peak" id="dtk-${decimatorId}">---</span>
     </div>
     <div class="el" id="el-container-${decimatorId}" style="display:none;margin-top:8px;">
       <div style="font-size:10px;color:#7f8995;margin-bottom:4px;">Elevation: <span id="el-peak-${decimatorId}" class="peak" style="color:#c55553">--°</span></div>
@@ -10961,6 +11073,7 @@ function connect() {
             digOnMessage(msg.digital);
           }
           else if(msg.map) { mapOnMessage(msg.map); }
+          else if(msg.doa_track) { dtOnMessage(msg.doa_track); }
           else if(msg.savedfreq) { sfOnMessage(msg.savedfreq); }
           else if(msg.sfscan) { sfsOnMessage(msg.sfscan); }
           else if(msg.incidents) { incOnMessage(msg.incidents); }
@@ -17913,7 +18026,8 @@ pacman -S --needed mingw-w64-ucrt-x86_64-fdk-aac`,
              ['masts', 'Masts', 'Radio masts, towers and antennas mapped in OpenStreetMap, loaded online for the area shown (zoom in to see them). The colour says what OpenStreetMap lists them for; click one for everything it knows about it']],
       df: [['rdfLobe', 'Lobe', 'The live DoA lobes around the station'],
            ['rdfLines', 'Lines', 'Bearing lines: from each lobe\'s peak to the edge of the map (one radio / aircraft: also its earlier bearings), and the bearings taken while driving'],
-           ['rdfHeat', 'Heat', 'Where the transmitter probably is (one VFO at a time)']],
+           ['rdfHeat', 'Heat', 'Where the transmitter probably is (one VFO at a time)'],
+           ['rdfTrack', 'Track', 'The bearing tracker\'s track (Tracking in the MUSIC DoA box): an amber line from the station along the tracked bearing with its uncertainty, dashed while it coasts between transmissions, grey once lost, and faint lines where it pointed over the last 10 s']],
       tools: [['vs', 'Viewshed', 'Viewshed: the ground in line of sight of an antenna at the station or any place you pick (right-click the map, a marker or a mast), over the terrain, anywhere in the world (terrain loaded online) - or, in its Signal mode, how reliably the signal gets there, also without line of sight (path loss over the terrain, link budget, clutter, fading)'],
               ['lr', 'Replay', 'Replay a DoA log of a drive on the map: the KrakenSDR Android app\'s (.csv / .sqlite) or a DoA Recording of this receiver - its track, bearings, lobes and the heat map of where the transmitter is, at any speed, back and forth. Read in this browser - nothing is uploaded (or drop the file on the map)'],
               ['rg', 'Range', 'Range from signal strength: where the transmitter of the selected lobe probably is - its measured level against the path loss over the terrain (ITU-R P.1812) and your estimate of its EIRP', 'coh-only']]
@@ -17949,7 +18063,7 @@ pacman -S --needed mingw-w64-ucrt-x86_64-fdk-aac`,
   }
   // every copy of the rows shows the states (also when they were changed elsewhere)
   function mapLaySync() {
-    const st = {trails: mapState.trails, masts: mapState.masts, rdfLobe: mapState.rdfLobe, rdfLines: mapState.rdfLines, rdfHeat: mapState.rdfHeat,
+    const st = {trails: mapState.trails, masts: mapState.masts, rdfLobe: mapState.rdfLobe, rdfLines: mapState.rdfLines, rdfHeat: mapState.rdfHeat, rdfTrack: mapState.rdfTrack,
                 vs: mapState.vs, lr: lrOpen, rg: rgState.on};
     for (const e of document.querySelectorAll('input[data-ml]')) { const v = !!st[e.dataset.ml]; if (e.checked !== v) e.checked = v; }
     const lk = mapLayerKey();
@@ -19102,7 +19216,7 @@ pacman -S --needed mingw-w64-ucrt-x86_64-fdk-aac`,
     // lobes, so the Lines button seemed to do nothing at a fixed station
     const st = rdfStatus.station;
     const showLobe = !!mapState.rdfLobe, showLines = !!mapState.rdfLines;
-    if ((showLobe || showLines) && st) {
+    if ((showLobe || showLines || mapState.rdfTrack) && st) {
       const [sx, sy] = mapLatLonToScreen(st.lat, st.lon);
       const R = 0.3 * Math.min(mapW, mapH), L = 2 * Math.max(mapW, mapH);
       const lobes = [];
@@ -19151,6 +19265,7 @@ pacman -S --needed mingw-w64-ucrt-x86_64-fdk-aac`,
         }
         c.restore();
       }
+      if (mapState.rdfTrack && rdfTidSel() === '') rdfDrawTracks(c, st, sx, sy, R, L);
       // the vehicle's heading
       if (st.hdg !== null && st.src !== 'static') {
         const a = st.hdg * Math.PI / 180;
@@ -19159,6 +19274,53 @@ pacman -S --needed mingw-w64-ucrt-x86_64-fdk-aac`,
         c.beginPath(); c.moveTo(sx, sy); c.lineTo(sx + 26 * Math.sin(a), sy - 26 * Math.cos(a)); c.stroke();
         c.restore();
       }
+    }
+  }
+  // 🎯 The bearing tracker's tracks (dtOnMessage; docs/dev/doa-tracking.md) from the station:
+  // the tracked bearing to the edge of the map in amber with a +-2 sigma wedge out to R,
+  // dashed while coasting, grey once lost, a label (VFO, compass bearing, rate) and the last
+  // 10 s as faint lines. The tracker works in array azimuth; the station heading turns it to
+  // a compass bearing like the lobes (doaToCompass) - no heading, no track on the map.
+  function rdfDrawTracks(c, st, sx, sy, R, L) {
+    if (st.hdg === null || st.hdg === undefined || !Number.isFinite(st.hdg)) return;
+    const ids = rdfSelIds(), now = performance.now();
+    for (const id of ids) {
+      const t = doaTracks[id];
+      if (!t || !Number.isFinite(t.az) || now - t.at > 1500) continue;
+      const lost = t.state === 'lost', col = lost ? '#7f8995' : '#e3a842';
+      const brg = doaToCompass(t.az, st.hdg);
+      const ray = (deg, len) => [sx + len * Math.sin(deg * Math.PI / 180), sy - len * Math.cos(deg * Math.PI / 180)];
+      c.save();
+      // where it pointed over the last 10 s, older fainter
+      const hst = doaTrackHist[id] || [];
+      c.strokeStyle = '#e3a842'; c.lineWidth = 1.2;
+      hst.forEach(([at, az]) => {
+        const age = (now - at) / 10000;
+        if (age >= 1) return;
+        c.globalAlpha = 0.35 * (1 - age);
+        const [x, y] = ray(doaToCompass(az, st.hdg), L);
+        c.beginPath(); c.moveTo(sx, sy); c.lineTo(x, y); c.stroke();
+      });
+      // the uncertainty wedge (+-2 sigma, at most +-45 deg)
+      const half = Math.min(45, Math.max(1, 2 * (Number.isFinite(t.sigma) ? t.sigma : 0)));
+      c.globalAlpha = lost ? 0.12 : 0.2; c.fillStyle = col;
+      c.beginPath(); c.moveTo(sx, sy);
+      for (let a = -half; a <= half + 1e-9; a += Math.max(0.5, half / 12)) { const [x, y] = ray(brg + a, R); c.lineTo(x, y); }
+      c.closePath(); c.fill();
+      // the track: a dark casing, then the colour
+      const [ex, ey] = ray(brg, L);
+      if (t.state === 'coasting' || lost) c.setLineDash([10, 6]);
+      c.globalAlpha = 1;
+      for (const [w, s] of [[5, 'rgba(0,0,0,0.6)'], [2.5, col]]) {
+        c.strokeStyle = s; c.lineWidth = w;
+        c.beginPath(); c.moveTo(sx, sy); c.lineTo(ex, ey); c.stroke();
+      }
+      c.setLineDash([]);
+      // compass bearings run clockwise, the tracker's azimuth counter-clockwise: the rate flips
+      const rate = -t.rate;
+      const [lx, ly] = ray(brg, 1.15 * R);
+      rdfMapLabel(c, `D${id} ${brg.toFixed(0)}\u00b0 ${rate >= 0 ? '+' : ''}${rate.toFixed(1)}\u00b0/s${t.state === 'coasting' ? ' (coasting)' : lost ? ' (lost)' : ''}`, lx + 4, ly);
+      c.restore();
     }
   }
   function rdfDist(m) { return m >= 1000 ? (m / 1000).toFixed(m >= 10000 ? 0 : 1) + ' km' : Math.round(m) + ' m'; }
