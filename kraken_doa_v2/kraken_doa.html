@@ -1326,6 +1326,16 @@ body.rp-both .rp-vsplit:hover, body.rp-both .rp-vsplit.dragging {background:var(
 .doa-display canvas {display:block;width:100%;height:100%}
 .doa-display .di {font-size:13px;text-align:center;margin-top:8px;color:var(--t5)}
 .doa-display .el canvas {height:auto;max-width:420px;margin:0 auto}
+/* ⏯ the replayed log's DoA plot (lrDoaSync); while it shows, the live plots are hidden unless Live is on */
+.doa-display.lr-doa-card {border-color:var(--warn)}
+.lr-doa-card h4 {color:var(--warn-t);display:flex;align-items:center;justify-content:center;gap:5px}
+.lr-doa-card .ti {font-size:11px;color:var(--t4);text-align:center;word-break:break-all}
+.lr-doa-card .lrd-ctl {display:flex;justify-content:center;gap:6px;margin-top:6px}
+body.lr-doa .doa-display:not(.lr-doa-card) {display:none}
+/* the live array calibrating / not converged: its plots greyed and inert - a replay's plot (body.lr-doa-on) stays usable */
+.doa-content.doa-cal {opacity:.5;pointer-events:none}
+body.lr-doa-on .doa-content.doa-cal {opacity:1;pointer-events:auto}
+body.lr-doa-on .doa-content.doa-cal .doa-display:not(.lr-doa-card) {opacity:.5;pointer-events:none}
 /* Desktop layout (the opposite of the phone layout's query): the VFOs' plots
    stand side by side in equal columns, and each is as large as its column and
    the pane's height allow (container units: .doa-content is the container;
@@ -4436,17 +4446,21 @@ let vsWorker = null, vsJob = null, vsSeq = 0, vsWorkerErr = '', vsHovAt = null, 
 // heat map range km), the log loaded (null: none), the strip shown;
 // mapDrawNow -> lrDraw reads them before that section is evaluated (lrReady)
 const lrUi = (() => {
-  const d = {speed: 10, follow: true, track: true, lines: 120, lobe: true, heat: true, power: false, range: 10};
+  // (live: the live MUSIC DoA plots stay shown next to the replay's)
+  const d = {speed: 10, follow: true, track: true, lines: 120, lobe: true, heat: true, power: false, range: 10, live: false};
   try {
     const s = JSON.parse(localStorage.getItem('kraken_lr') || '{}');
     if ([0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500].includes(s.speed)) d.speed = s.speed;
     if ([0, 30, 120, 600, -1].includes(s.lines)) d.lines = s.lines;
-    for (const k of ['follow', 'track', 'lobe', 'heat', 'power']) if (typeof s[k] === 'boolean') d[k] = s[k];
+    for (const k of ['follow', 'track', 'lobe', 'heat', 'power', 'live']) if (typeof s[k] === 'boolean') d[k] = s[k];
     if (Number.isInteger(s.range) && s.range >= 1 && s.range <= 50) d.range = s.range;
   } catch (e) {}
   return d;
 })();
 let lr = null, lrOpen = false, lrReady = false;
+// the replay's MUSIC DoA plot (lrDoaSync): its PolarPlot and the row it shows
+// (-2 = none drawn yet); setDoaConvention reaches it through lrDoaConv
+let lrDoaPlot = null, lrDoaRow = -2;
 // 📶 path loss (see 📶 PATH LOSS): the radio + channel settings of the
 // viewshed's signal mode, the link (a viewshed site's id + the far place;
 // localStorage kraken_pl; rebuilt field by field); the link worker, its job
@@ -6131,10 +6145,16 @@ class PolarPlot {
 
   drawBg() {
     const ctx=this.ctx,cx=this.cx,cy=this.cy,r=this.r;
+    // the whole bitmap, in device pixels: fit()'s transform (px / 250) made a
+    // 0..width rect cover only part of a plot drawn smaller than 250 px, and
+    // the earlier lobes stayed in its right / bottom strips
+    ctx.save();
+    ctx.setTransform(1,0,0,1,0,0);
     ctx.clearRect(0,0,this.c.width,this.c.height);
     // Dark theme colors
     ctx.fillStyle='#171c23';
     ctx.fillRect(0,0,this.c.width,this.c.height);
+    ctx.restore();
     ctx.strokeStyle='#333b46';
     ctx.lineWidth=1;
 
@@ -6737,6 +6757,7 @@ function setDoaConvention(v){
     const peakEl=$id('dpk-'+id);
     if(peakEl) peakEl.textContent=p.getFormattedPeakAngle();
   }
+  if (typeof lrDoaConv === 'function') lrDoaConv();   // the replay's plot
   sendUI('DOA_CONV',doaConvention);  // no-op send while applying a remote sync
   binDoaLegend();   // the bearing colours' legend: its labels follow the convention
 }
@@ -29050,9 +29071,13 @@ pacman -S --needed mingw-w64-ucrt-x86_64-fdk-aac`,
 
   // --- the strip: shown / hidden (the Replay button), the log unloaded (✕) ---
   function lrToggle(on) {
+    const was = lrOpen;
     lrOpen = on === undefined ? !lrOpen : !!on;
     if (!lrOpen) lrPlay(false);
     if (lrOpen && !mapIsOn()) mapToggle(true);
+    // opened: MUSIC DoA + the map side by side in coherent mode (the replay's
+    // DoA plot and its strip both in view), else the map
+    if (lrOpen && !was && opMode === 'coherent' && !driveOn) rpShow('both');
     else if (lrOpen && mapState.tab === 'doa') rpShow('map');
     lrRender();
     mapUpdateControls();
@@ -29290,8 +29315,9 @@ pacman -S --needed mingw-w64-ucrt-x86_64-fdk-aac`,
   function lrTick(now) {
     lrRaf = 0;
     if (!lr || !lr.playing) return;
-    // the map hidden: pause (nothing to watch)
-    if (!lrOpen || !document.body.classList.contains('rp-map')) { lrPlay(false); return; }
+    // the pane hidden: pause (nothing to watch). The MUSIC DoA tab alone
+    // keeps playing: it shows the replay's plot (lrDoaSync)
+    if (!lrOpen || !document.body.classList.contains('map-on')) { lrPlay(false); return; }
     const dt = Math.min(250, now - lr.last);
     lr.last = now;
     lr.a = Math.min(lr.A1, lr.a + dt * lrUi.speed);
@@ -29545,6 +29571,7 @@ pacman -S --needed mingw-w64-ucrt-x86_64-fdk-aac`,
     return (s.freq ? (s.freq / 1e6).toFixed(4) + ' MHz' : 'frequency not logged') + (s.vfo !== null ? ' · D' + s.vfo : '');
   }
   function lrRender() {
+    lrDoaSync(true);
     const el = $id('map-lr'), pane = $id('map-pane');
     if (!el) return;
     el.style.display = lrOpen ? '' : 'none';
@@ -29655,7 +29682,87 @@ pacman -S --needed mingw-w64-ucrt-x86_64-fdk-aac`,
     if (el && lrOpen) $id('map-pane').style.setProperty('--lr-h', el.offsetHeight + 'px');
   }
   // the parts that change while playing: time, play button, timeline, the row / heat line
+  // ⏯ the replay on the MUSIC DoA tab: a plot of its own (first in
+  // #doa-displays, amber) showing the selected signal's row at the replay's
+  // moment - the logged lobe (the map's display lobe, linear, counter-clockwise
+  // from the array's front like the live plots' spectrum), or for a
+  // bearing-only row a narrow lobe at its bearing. While it shows, the live
+  // plots are hidden (body.lr-doa) unless Live is on. Redrawn when the row
+  // changes (every frame of a playback asks)
+  function lrDoaSync(force) {
+    const on = !!(lrReady && lr && lrOpen && lr.idx);
+    document.body.classList.toggle('lr-doa', on && !lrUi.live);
+    document.body.classList.toggle('lr-doa-on', on);
+    let card = $id('doa-container-lr');
+    if (!on) {
+      if (card) { if (card._ro) card._ro.disconnect(); card.remove(); }
+      lrDoaPlot = null; lrDoaRow = -2;
+      return;
+    }
+    if (!card) {
+      const box = $id('doa-displays');
+      if (!box) return;
+      card = document.createElement('div');
+      card.className = 'doa-display lr-doa-card';
+      card.id = 'doa-container-lr';
+      card.innerHTML =
+        '<h4>' + icon('replay') + '<span>Replay · <span id="lrd-sig"></span></span></h4>' +
+        '<div class="ti" id="lrd-name"></div>' +
+        '<div class="doa-content-row"><div class="dp"><canvas id="dcan-lr" width="250" height="250"></canvas></div></div>' +
+        '<div class="di">MUSIC: <span class="peak" id="lrd-pk">---</span></div>' +
+        '<div class="di" id="lrd-row"></div>' +
+        '<div class="lrd-ctl"><button type="button" class="btn sm" id="lrd-play" onclick="lrPlay()" title="Play / pause the replay"></button>' +
+        '<button type="button" class="btn sm" id="lrd-live" onclick="lrSet(\'live\', !lrUi.live)" title="Show the live MUSIC DoA plots next to the replay\'s">Live</button></div>';
+      box.prepend(card);
+      lrDoaPlot = new PolarPlot('dcan-lr');
+      lrDoaPlot.setConvention(doaConvention);
+      if (window.ResizeObserver) {
+        const ro = new ResizeObserver(() => { if (lrDoaPlot) lrDoaPlot.fit(); });
+        ro.observe(card.querySelector('.dp'));
+        card._ro = ro;
+      }
+      lrDoaRow = -2;
+    }
+    const pb = $id('lrd-play'), pl = lr.playing ? 'pause' : 'play';
+    if (pb.dataset.ic !== pl) { pb.dataset.ic = pl; pb.innerHTML = icon(pl) + '<span>' + (lr.playing ? 'Pause' : 'Play') + '</span>'; }
+    $id('lrd-live').classList.toggle('on', !!lrUi.live);
+    const ri = lrRowAt(lr.t);
+    if (ri === lrDoaRow && !force) return;
+    lrDoaRow = ri;
+    const o = lr.o, S = lr.sigs[lr.sel] || {};
+    $id('lrd-sig').textContent = (S.freq ? (S.freq / 1e6).toFixed(3) + ' MHz' : 'frequency not logged') + (S.vfo != null ? ' · D' + S.vfo : '');
+    $id('lrd-name').textContent = lr.name || '';
+    let spec = null;
+    if (ri >= 0 && o.lob[ri] >= 0) {
+      const b = o.lob[ri] * 360, lm = Number.isFinite(o.lmin[ri]) ? o.lmin[ri] : 0;
+      spec = new Array(360);
+      for (let k = 0; k < 360; k++) spec[k] = 1e-6 + lm + (1 - lm) * o.lobes[b + k] / 255;
+    } else if (ri >= 0 && Number.isFinite(o.rel[ri])) {
+      // bearing only (clockwise from the front): the array angle is 360 - it
+      const az = ((360 - o.rel[ri]) % 360 + 360) % 360;
+      spec = new Array(360);
+      for (let k = 0; k < 360; k++) { const d = ((k - az + 540) % 360) - 180; spec[k] = 1e-3 + Math.exp(-d * d / 50); }
+    }
+    const f1 = x => Number.isFinite(x) ? x.toFixed(1) : '–';
+    if (spec) {
+      lrDoaPlot.updateData(spec, 1);
+      $id('lrd-pk').textContent = lrDoaPlot.getFormattedPeakAngle() +
+        (Number.isFinite(o.brg[ri]) ? ' · compass ' + Math.round(o.brg[ri]) + '°' : '') + (o.lob[ri] < 0 ? ' (bearing only)' : '');
+      $id('lrd-row').textContent = lrFmtT(o.t[ri]) + ' · conf ' + f1(o.conf[ri]) + ' · ' + f1(o.pow[ri]) + ' dB';
+    } else {
+      lrDoaPlot.data = new Array(360).fill(0); lrDoaPlot.min = 0; lrDoaPlot.max = 1; lrDoaPlot.peakIdx = -1;
+      lrDoaPlot.drawBg();
+      $id('lrd-pk').textContent = '---';
+      $id('lrd-row').textContent = lrFmtT(lr.t) + ' · no bearing at this moment';
+    }
+  }
+  function lrDoaConv() {
+    if (!lrDoaPlot) return;
+    lrDoaPlot.setConvention(doaConvention);
+    lrDoaSync(true);
+  }
   function lrRenderDyn(force) {
+    lrDoaSync(false);
     if (!lrOpen || !lr || !$id('lr-time')) return;
     $id('lr-time').textContent = (lr.info.retimed ? '≈ ' : '') + lrFmtT(lr.t);
     $id('lr-pos').textContent = lrFmtDur(lr.a) + ' / ' + lrFmtDur(lr.A1);
@@ -30378,8 +30485,8 @@ function updateCalIndicator(phaseState, noiseOn, wideband, cooldownActive) {
       // States 0-3 and 5 are all "not converged" states
       const isCalibrating = status.phase_state === 5 || status.cooldown_active ||
         (status.phase_state !== undefined && status.phase_state >= 0 && status.phase_state < 4);
-      doaPanel.style.opacity = isCalibrating && !lastStatusWideband ? '0.5' : '1';
-      doaPanel.style.pointerEvents = isCalibrating && !lastStatusWideband ? 'none' : 'auto';
+      // (a class, not inline styles: a replay's plot stays usable - CSS .doa-cal)
+      doaPanel.classList.toggle('doa-cal', isCalibrating && !lastStatusWideband);
     }
 
     // Update scanner indicator

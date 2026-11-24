@@ -212,3 +212,45 @@ folder (index: `README.md` here, or the table in `kraken_doa_v2/CLAUDE.md`);
   no part file left, server up; headless Edge (real click on Replay): Upload
   -> "stored", listed + selected, Replay loads all 300 rows of a synthetic
   drive, junk -> refused note, no page errors
+
+**⏯ The replay on the MUSIC DoA tab (2026-11-24):**
+- The user: "Right now we can only see the current kraken input, not the
+  replay" - the replay drew only on the map; the MUSIC DoA plots kept
+  showing the live array. Now a replay has a DoA plot of its own
+  (`lrDoaSync`, ⏯ LOG REPLAY section; state `lrDoaPlot` / `lrDoaRow` in the
+  globals block): a card `#doa-container-lr` (`.lr-doa-card`, amber border,
+  "Replay · <MHz> · D<vfo>", the file name) FIRST in `#doa-displays`, a
+  `PolarPlot` on `#dcan-lr` showing the SELECTED signal's row at the replay's
+  moment (`lrRowAt`, so the 30 s hold applies): the logged lobe rebuilt
+  linear from the display bytes + `lmin` (the same frame as the live plots'
+  spectrum: counter-clockwise from the array's front), or for a bearing-only
+  row a Gaussian (sigma 5 deg) at 360 - the logged bearing, marked "(bearing
+  only)"; "MUSIC: <peak in the display convention> · compass <heading +
+  bearing>", time · conf · power; Play / Pause (lrPlay) and Live. Redrawn
+  only when the row changes (lrRenderDyn asks every frame), forced by
+  lrRender (load, signal, layers, close) and `lrDoaConv` (setDoaConvention).
+- While it shows, the live plots are hidden (`body.lr-doa`) unless **Live**
+  is on (`lrUi.live`, in localStorage kraken_lr); `body.lr-doa-on` whenever
+  the card exists. Closing the replay removes the card and brings them back.
+- Opening a replay (closed -> open, `lrToggle`) in coherent mode outside
+  drive mode switches the pane to **Both** (the plot and the strip in view);
+  otherwise the DoA tab still goes to the map. Playback now pauses only when
+  the pane itself is hidden (`map-on`), not when the DoA tab alone shows it.
+- The live array calibrating / not converged used to grey the whole DoA
+  pane with inline opacity / pointer-events, which also made the replay card
+  unclickable (no heimdall = always): it is a class now (`.doa-cal`), and
+  with a replay card only the live plots are greyed and inert.
+- Fixed on the way (all DoA plots): `PolarPlot.drawBg` cleared 0..width in
+  fit()'s scaled space, so a plot drawn smaller than 250 px (Both view, a
+  narrow pane) kept earlier lobes in its right / bottom strips; it clears in
+  device pixels now.
+- Tests (job scratch lr_doa_page.py, headless Edge on the WSL TEST build, no
+  heimdall): a log in the receiver's CSV layout with a 360-point spectrum
+  peaking at (i x 7) mod 360 deg - uploaded and replayed from the DoA tab:
+  Both view, card first, live plot hidden; peak = the logged bearing at 7
+  seeks (compass) and 360 - it (unit), compass = heading + bearing, the
+  canvas after the seeks = a fresh plot of the row (no stale lobes); plays
+  on the DoA tab alone and the plot follows; the card's Pause by a real
+  click while "calibrating"; the live plot greyed, the card not; Live on /
+  off; a bearing-only log; close restores the live plots and the grey; no
+  page errors (22 / 22). Palette check OK.
