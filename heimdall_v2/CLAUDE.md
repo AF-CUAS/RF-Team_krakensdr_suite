@@ -72,6 +72,20 @@ main thread.
 
 ## Invariants
 
+Calibration - settled by measurement; don't reopen these without new
+measurements (reasons in `docs/dev/calibration.md`)
+- Lag: a proportional servo on the sample-clock correction register only
+  (`rtlsdr_set_sample_freq_correction_f`; the tuner LO is untouched),
+  MEASURING -> SERVOING -> CONVERGED (within +-0.02 samples).
+- Phase: phase-only, from the dominant eigenvector of the noise-source
+  covariance; one unit phasor per channel, applied in the conversion loop.
+- Gain is measured but not corrected: the noise source compresses the front
+  end, so its gain estimates are off by up to ~2.4 dB.
+- The R820T IF VGA is fixed (`rtlsdr_set_tuner_if_mode(10000 + step)`,
+  `R820T_IF_VGA_*`: step 8 with manual gain, 11 with tuner AGC). The step
+  shifts each dongle's phase differently, so calibration and operation must
+  use the same step; the noise source's clipping at step 8 is accepted.
+
 Coherence
 - The N-th sample set from every dongle must be the same instant. Drop data
   only as whole aligned sets (at L2-raw), never one device's buffer: a

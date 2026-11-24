@@ -13,7 +13,7 @@ measurements and decisions; when they disagree with the code, the code wins.
 | Area | Read |
 |---|---|
 | heimdall: rules and invariants, then the internals (calibration, coherence recovery, pipeline, operating modes, drag retunes, calibration hold) | `heimdall_v2/CLAUDE.md`, then `heimdall_v2/docs/dev/` |
-| kraken_doa: rules, the command path, testing; then one file per feature (index below) | `kraken_doa_v2/CLAUDE.md`, then `kraken_doa_v2/docs/dev/<topic>.md` |
+| kraken_doa: rules, the command path, testing; then one file per feature (index at the end of its CLAUDE.md; in progress: `doa-tracking.md`, the drone bearing tracker) | `kraken_doa_v2/CLAUDE.md`, then `kraken_doa_v2/docs/dev/<topic>.md` |
 | Writing, testing and licensing a decoder plugin | `kraken_doa_v2/plugins/SDK.md`, `kraken_doa_v2/plugins/<id>/README.md` |
 | run.sh / install.sh internals, Docker, logging, network access checks, git secret guards | `docs/dev/run-and-deploy.md` |
 | Windows port; the librtlsdr fork (WinUSB fixes, fast retunes, USB transfer counts) | `docs/dev/windows.md`, `docs/dev/librtlsdr-fork.md` |
@@ -66,11 +66,8 @@ build_windows.bat   run.bat   windows/package.sh                  # Windows buil
   refresh the browser); heimdall reads `index.html` once at startup (edit,
   restart heimdall).
 - Builds use `-march=native` / `-mcpu=native`, so build on the machine that
-  runs the result (a Pi 5 build fails on a Pi 4 with illegal instruction). A
-  flags stamp (`build/.flags`, `obj/.flags`, `plugins/lib/build/.flags`)
-  recompiles everything when the flags change.
-- heimdall also has a CMakeLists.txt; it needs
-  `../librtlsdr/build/src/librtlsdr.a` built first.
+  runs the result (a Pi 5 build fails on a Pi 4 with illegal instruction).
+  A flags stamp recompiles everything when the flags change.
 - Bring-up check: heimdall reaches CONVERGED ~25-30 s after start (web UI
   http://localhost:8070), then kraken_doa serves https://localhost:8080.
   `echo '{"command":"get_status"}' | nc localhost 8092` prints heimdall's status.
@@ -98,29 +95,14 @@ cross-correlation, lag servo, phase calibration). A coherence watchdog flushes
 and recalibrates after a desync. Calibration uses the KrakenSDR's internal
 noise source, switched only through `set_bias_tee_all_devices()`
 (`heimdall_v2/src/sdr/sdr_init.cpp`); every hardware variant hooks into that
-one function.
+one function. The calibration method (lag servo on the sample-clock register,
+phase-only, gain not corrected, fixed IF VGA) is settled by measurement: don't
+reopen it without new measurements (`heimdall_v2/CLAUDE.md` *Invariants*).
 
-Calibration decisions, settled by measurement (don't reopen them without new
-measurements; reasons in `heimdall_v2/docs/dev/calibration.md`):
-- Lag: a proportional servo on the sample-clock correction register only
-  (`rtlsdr_set_sample_freq_correction_f`; the tuner LO is untouched),
-  MEASURING -> SERVOING -> CONVERGED (within +-0.02 samples).
-- Phase: phase-only, from the dominant eigenvector of the noise-source
-  covariance; one unit phasor per channel, applied in the conversion loop.
-- Gain is measured but not corrected: the noise source compresses the front
-  end, so its gain estimates are off by up to ~2.4 dB.
-- The R820T IF VGA is fixed (`rtlsdr_set_tuner_if_mode(10000 + step)`,
-  `R820T_IF_VGA_*`: step 8 with manual gain, 11 with tuner AGC). The step
-  shifts each dongle's phase differently, so calibration and operation must
-  use the same step; the noise source's clipping at step 8 is accepted.
-
-**Element count**: `NUM_DEVICES` (8) is only a compile-time ceiling. The
-live count N comes from `-n`, else the saved `num_elements`, else the number
-of expected serials ("1000".."1007") attached; `--kerberos` defaults to 4.
-Changing N at runtime closes every handle, reopens the first N and
-recalibrates (rolling back on failure); dongles beyond N stay free for other
-programs. Clients follow the channel count in the 8091 header
-(`MAX_CHANNELS` / `DOA_NUM_ELEMENTS` = 8 are ceilings).
+**Element count**: the live count N is set at runtime (`-n`, the saved
+`num_elements`, or the KrakenSDR serials attached) and can change while
+running; 8 (`NUM_DEVICES`, `MAX_CHANNELS`, `DOA_NUM_ELEMENTS`) is only a
+ceiling. Clients follow the channel count in the 8091 header.
 
 **kraken_doa**: TCP client (8091) -> uint8 to complex (a plain loop the
 compiler vectorizes; it beats hand-written NEON - keep it) -> one
@@ -145,65 +127,24 @@ mode unavailable). Every consumer masks the low byte.
   discrete scanner), independent (each tuner its own frequency, gain and
   pane; no calibration). The client follows heimdall's mode from the header
   flags and parks DoA / beamforming outside coherent mode.
-- **`--wideband` / `-w`** (KrakenSDR Wideband downconverter, both apps):
-  tuners stay at the 1268 MHz IF and a retune reprograms one shared moRFeus
-  LO. The user-facing frequency is always the true RF. Mixer side and antenna
-  ring follow the frequency (`wideband_retune_rf()`). The `WB_*` constants in
-  `heimdall_v2/config.h` and `kraken_doa_v2/include/config.hpp` must match;
-  frequencies are `uint64_t` end to end. Not the same thing as wideband scan
-  mode, which is refused with this variant.
-- **`--kerberos`** (KerberosSDR, no noise-source switch): it never
-  calibrates on its own, because the antennas must be disconnected by hand;
-  only the web UI's Full Recalibration runs one, and a retune marks the
-  calibration STALE. **`--kerberos_sw`**: third-party antenna switches on Pi
-  GPIO 23/24 (gpio v2 character device) restore automatic calibration; it
-  falls back to manual mode if the GPIOs are unavailable.
-- **`--ext_noise`**: an add-on array's noise source, powered from the CH0
-  bias tee (GPIO1), replaces the internal one (GPIO0); CH0's antenna bias tee
-  is reserved. Refused together with `--wideband` or `--kerberos*`.
-- **Generic RTL-SDRs** (no flag): with no KrakenSDR / KerberosSDR attached
-  (fewer than 2 of its serials) and no `--serials` / variant flag, heimdall
-  runs whatever RTL-SDRs are attached (1-8, any serials, opened by USB index)
-  in independent mode: no coherent mode, no calibration, no GPIO write ever
-  (a generic dongle's GPIO0 is its antenna bias tee). The header channel
-  count can be 1; 8091 flag 0x1000, status `generic_rtlsdr`.
-  `heimdall_v2/docs/dev/operating-modes.md`.
+- Hardware variants (details: `heimdall_v2/docs/dev/operating-modes.md`,
+  `kerberos-and-ext-noise.md`, `kraken_doa_v2/docs/dev/wideband-variant.md`):
+  - **`--wideband` / `-w`** (KrakenSDR Wideband downconverter, both apps):
+    tuners stay at the 1268 MHz IF and a retune moves one shared LO; the
+    user-facing frequency is always the true RF, `uint64_t` end to end. Not
+    the same thing as wideband scan mode (refused with this variant).
+  - **`--kerberos`** (KerberosSDR, no noise-source switch): calibrates only
+    from the web UI's Full Recalibration; a retune marks it STALE.
+    **`--kerberos_sw`**: Pi-GPIO antenna switches restore automatic
+    calibration.
+  - **`--ext_noise`**: an add-on array's noise source on the CH0 bias tee
+    replaces the internal one. Refused with `--wideband` / `--kerberos*`.
+  - **Generic RTL-SDRs** (no KrakenSDR attached, no flag): whatever dongles
+    are attached (1-8), independent mode only, no calibration and never a
+    GPIO write (a generic dongle's GPIO0 is its antenna bias tee); 8091
+    flag 0x1000.
 - UCA arrays are wired clockwise; `uca_angle_sign()`
   (`kraken_doa_v2/include/globals.hpp`) is the single chirality choke point.
-
-## Client feature index
-
-One file per feature in `kraken_doa_v2/docs/dev/` (the full index is at
-the end of `kraken_doa_v2/CLAUDE.md`). Decoders also have
-`kraken_doa_v2/plugins/<id>/README.md`.
-
-- Spectrum: `spectrum-views.md` (`FFT_VIEW:`, message type 7),
-  `noise-floor.md`, `bearing-spectrum.md` (colours by DoA, type 9),
-  `doa-tracking.md` (bearing tracker for moving emitters - a drone at
-  915.1 MHz; in progress: its "Status and how to resume" section)
-- VFOs: `vfo-bandwidth.md` (any width 1 kHz - 2.4 MHz, the decimator),
-  `vfo-audio.md`, `operating-modes.md` (also VFO cards, the tuning step,
-  zoom), `sidebar.md` (the boxes: move, collapse, the remembered layout;
-  how controls and text are written on the whole page), `theme.md` (the
-  colour palette), `icons.md` (the icon set: no emoji)
-- Decoders (every decoder is a plugin): `decoder-plugins.md`,
-  `digital-decoders.md`, `digital-voice.md`, `digital-squelch.md`,
-  `doa-per-talker.md`, `fixed-frequency-decoders.md`, and
-  `plugin-<id>.md` per plugin
-- Scanning: `saved-frequency-scan.md` (the discrete, continuous and
-  saved-frequency scanners are mutually exclusive), `saved-frequencies.md`
-- Map: `map.md`, `map-search.md`, `station-on-map.md`, `osm-masts.md`,
-  `viewshed.md`, `path-loss.md`, `range.md` (range from signal strength,
-  a VFO's level on mouseover), `incident-map.md`, `mobile-df.md`,
-  `log-replay.md`, `drive-mode.md` (DF from a vehicle: the map
-  full-window, one big bearing, big buttons, a Day look)
-- Recording and playback: `recorder.md` (`SIGMF.md`), `debug-playback.md`,
-  `decoder-log.md`, `voice-to-text.md`
-- Other: `ai-assistant.md`, `web-mapper.md`, `array-calibration.md`
-  (experimental), `array-calculator.md`, `wideband-variant.md`,
-  `fft-pffft.md`, `liquid-dsp.md`, `power.md` (the page's Restart / Shut down),
-  `bias-tees.md` (the antenna bias tees from the top bar; heimdall's
-  `set_antenna_bias_tees`)
 
 ## Rules
 
@@ -240,12 +181,6 @@ the end of `kraken_doa_v2/CLAUDE.md`). Decoders also have
   `-O3 -ffast-math -fno-finite-math-only`; heimdall and the plugins use
   `-O3 -fno-math-errno -fcx-fortran-rules` without fast-math. Use
   `is_finite_value()` for finiteness checks.
-- Apple clang has no `-fcx-fortran-rules`, and libc++ puts its inf / NaN
-  recovery in the `<complex>` code itself, so on macOS the force-included
-  `mac/fast_complex.h` supplies `std::complex` `*`, `*=` and `norm` without
-  it (~20 % of the plugins' and kraken_doa's CPU). It uses overloads, not
-  specializations, because libc++ 16+ can't take a specialization;
-  `docs/dev/macos.md` has the details.
 
 ### Runtime files, logging, web security
 - Every runtime file path is cwd-relative (Docker runs each app in
@@ -313,46 +248,37 @@ the end of `kraken_doa_v2/CLAUDE.md`). Decoders also have
 
 ## Dependencies
 
-- **librtlsdr**: the krakenrf fork, linked statically from
-  `librtlsdr/build/src/librtlsdr.a` (a distro `librtlsdr0` would shadow a
-  shared build and lose the sample-clock servo and GPIO control). heimdall
-  requires 578b43d or later on every platform (`RTLSDR_FIX_MARK` =
-  `rtlsdr_finish_tune`); its Makefile fast-forwards an older clone or stops
-  with instructions, and the Dockerfile pins `LIBRTLSDR_COMMIT`. Don't
-  install `librtlsdr-dev`; distro rtl-sdr packages may stay installed.
-- **uWebSockets** is pinned (`UWS_COMMIT` fe7da4cb): newer master defines
-  `uWS::time_ms()` without `inline` in `HttpCache.h`, and the link fails. The
-  Makefiles move a checkout on another commit back to the pin.
-- **FFT**: pffft, vendored in both apps; the plugins use it through
-  `plugins/sdk/kraken_fft.hpp`. No program of the suite links FFTW (only
-  gr-krakensdr_v2 does).
-- **liquid-dsp**: built from source by `kraken_doa_v2/liquid.mk` (pinned
-  v1.7.0, static, without FFTW / libfec - Debian's build links both).
+- **librtlsdr**: the krakenrf fork, linked statically (a distro build lacks
+  the sample-clock servo and GPIO control); the Makefile keeps the clone at
+  the commit heimdall needs (`docs/dev/librtlsdr-fork.md`). Don't install
+  `librtlsdr-dev`; distro rtl-sdr packages may stay installed.
+- **uWebSockets** is pinned (`UWS_COMMIT`; newer master fails to link); the
+  Makefiles move a checkout back to the pin.
+- **FFT**: pffft, vendored in both apps (plugins: `plugins/sdk/kraken_fft.hpp`).
+  Nothing in the suite links FFTW except gr-krakensdr_v2.
+- **liquid-dsp**: built from source by `kraken_doa_v2/liquid.mk` (pinned,
+  static, without FFTW / libfec).
 - **System**: libusb-1.0, cmake, Eigen3, OpenSSL, Opus, zlib, SQLite,
   pkg-config, a C++20 compiler (`make deps` / install.sh install them).
 
 ## Platform notes
 
 **Windows** (`docs/dev/windows.md`, `docs/dev/librtlsdr-fork.md`):
-- Static exes from the same Makefiles under MSYS2 UCRT64, with a portable
-  `WIN_MARCH ?= -march=x86-64-v3`. Exes link to `.tmp` and are moved into
-  place (a running exe can't be overwritten). `krakensdr.exe` (from
-  `windows/krakensdr.cpp`) does run.sh's job. Dongles need the WinUSB
-  driver (Zadig).
-- USB control transfers take 3-4 ms each and run one at a time, so heimdall
-  opens and tunes dongles one by one on Windows (`for_each_tuner`; parallel
-  tuning times out with -7) and coalesces queued 8092 retunes.
+- Static exes from the same Makefiles under MSYS2 UCRT64 (portable
+  `WIN_MARCH`); `krakensdr.exe` (`windows/krakensdr.cpp`) does run.sh's
+  job. Dongles need the WinUSB driver.
+- USB control transfers are slow and serial on Windows, so heimdall opens
+  and tunes dongles one by one there (`for_each_tuner`); keep it that way.
 - Claude Code has no sandbox on Windows: the AI assistant gets no shell
   there, and a plugin it changed doesn't run until trusted.
-- Linux builds and tests from a Windows checkout: WSL
-  (`kraken_doa_v2/tools/doa_track/wsl_setup.sh`, no sudo needed). Never
-  run git from WSL in the Windows checkout: it has no autocrlf, sees every
-  file as changed, and a stash / checkout rewrites them all as LF.
+- Linux builds and tests from a Windows checkout run in WSL
+  (`kraken_doa_v2/tools/doa_track/wsl_setup.sh`). Never run git from WSL in
+  the Windows checkout: it has no autocrlf and rewrites files as LF.
 
 **macOS** (`docs/dev/macos.md`): the same Makefiles (`MACOS`), Homebrew in
-place of apt, compatible with Apple clang 14 (no `-fcx-fortran-rules` -
-`mac/fast_complex.h` stands in -, no floating-point `std::from_chars`). Docker can't pass USB through on macOS -
-use the native install. CMakeLists.txt and the boot service aren't ported.
+place of apt, Apple clang 14+ (no `-fcx-fortran-rules`: the force-included
+`mac/fast_complex.h` stands in; no floating-point `std::from_chars`). Docker
+can't pass USB through on macOS - use the native install.
 
 ## Maintaining this file
 
