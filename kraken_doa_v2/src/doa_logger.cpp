@@ -12,12 +12,17 @@
 #include "signal_processing/fft_processor.hpp"
 #include "utils/fs_compat.hpp"
 #include "utils/json_escape.hpp"
+#include "utils/disk_util.hpp"
 
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <deque>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -268,6 +273,214 @@ bool doa_delete_recording(const std::string& name) {
     std::filesystem::remove(dir / (base + "-wal"), ec);
     std::filesystem::remove(dir / (base + "-shm"), ec);
     return removed;
+}
+
+// ---------------------------------------------------------------------------
+// Upload of a DoA log into doa_recordings/ (POST /recordings_upload/<name>)
+// ---------------------------------------------------------------------------
+
+struct DoaUpload {
+    std::string name;              // as asked; the final name is picked at the end
+    std::string part;              // hidden ".upload-<ms>-<name>.tmp": never listed or served
+    uint64_t length = 0, got = 0;
+    FILE* f = nullptr;
+    std::mutex mu;
+    std::condition_variable cv;
+    std::deque<std::string> q;
+    uint64_t queued = 0;
+    bool finish = false, abort = false, failed = false;
+    std::string error;
+    std::function<void()> on_drain;
+    std::function<void(bool, std::string)> done;
+    std::thread th;
+};
+
+namespace {
+constexpr uint64_t DOA_UP_HIGH = 16u << 20, DOA_UP_LOW = 4u << 20;
+std::mutex g_doa_up_name_mu;   // picking a free final name + the rename
+
+bool doa_upload_name_ok(const std::string& n, std::string* base, std::string* ext) {
+    if (n.empty() || n.size() > 128 || n[0] == '.' || n[0] == '-') return false;
+    for (unsigned char c : n)
+        if (!(std::isalnum(c) || c == '.' || c == '_' || c == '-')) return false;
+    const size_t dot = n.rfind('.');
+    if (dot == std::string::npos || dot == 0) return false;
+    std::string e = n.substr(dot);
+    for (auto& c : e) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    static const char* const ok[] = {".csv", ".txt", ".log", ".sqlite", ".sqlite3", ".db", ".db3"};
+    if (std::find_if(std::begin(ok), std::end(ok), [&](const char* s) { return e == s; }) == std::end(ok)) return false;
+    *base = n.substr(0, dot);
+    *ext = n.substr(dot);
+    return doa_sanitize_filename(n) == n;
+}
+
+// What the replay reads: an SQLite database, or text (CSV; UTF-16 with a BOM
+// from a spreadsheet's "Unicode text")
+bool doa_upload_content_ok(const std::string& path) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return false;
+    unsigned char b[4096];
+    const size_t n = std::fread(b, 1, sizeof b, f);
+    std::fclose(f);
+    if (n >= 16 && std::memcmp(b, "SQLite format 3", 16) == 0) return true;
+    if (n >= 2 && ((b[0] == 0xFF && b[1] == 0xFE) || (b[0] == 0xFE && b[1] == 0xFF))) return true;
+    if (n == 0) return false;
+    return std::memchr(b, 0, n) == nullptr;
+}
+
+void doa_upload_main(DoaUpload* u) {
+    uint64_t written = 0;
+    for (;;) {
+        std::string chunk;
+        std::function<void()> drain;
+        bool fin = false, ab = false;
+        {
+            std::unique_lock<std::mutex> lk(u->mu);
+            u->cv.wait(lk, [&] { return !u->q.empty() || u->finish || u->abort; });
+            ab = u->abort;
+            if (!ab && !u->q.empty()) {
+                chunk = std::move(u->q.front());
+                u->q.pop_front();
+            } else if (!ab) {
+                fin = u->finish;
+            }
+        }
+        if (ab) break;
+        if (!chunk.empty()) {
+            if (!u->failed && std::fwrite(chunk.data(), 1, chunk.size(), u->f) != chunk.size()) {
+                std::lock_guard<std::mutex> lk(u->mu);
+                u->failed = true;
+                u->error = std::string("writing failed: ") + std::strerror(errno);
+            }
+            written += chunk.size();
+            std::lock_guard<std::mutex> lk(u->mu);
+            u->queued -= std::min<uint64_t>(u->queued, chunk.size());
+            if (u->on_drain && u->queued < DOA_UP_LOW) drain = std::move(u->on_drain), u->on_drain = nullptr;
+        }
+        if (drain) drain();
+        if (fin) break;
+    }
+    bool ok = false;
+    std::string msg, final_name;
+    {
+        std::lock_guard<std::mutex> lk(u->mu);
+        if (u->abort) msg = "aborted";
+        else if (u->failed) msg = u->error;
+        else if (written != u->length) msg = "the upload ended after " + std::to_string(written) + " of " + std::to_string(u->length) + " bytes";
+    }
+    if (u->f) {
+        if (msg.empty() && (std::fflush(u->f) != 0 || fdatasync(fileno(u->f)) != 0))
+            msg = std::string("writing failed: ") + std::strerror(errno);
+        std::fclose(u->f);
+        u->f = nullptr;
+    }
+    if (msg.empty() && !doa_upload_content_ok(u->part))
+        msg = "not a DoA log (neither an SQLite database nor CSV text)";
+    if (msg.empty()) {
+        std::string base, ext;
+        doa_upload_name_ok(u->name, &base, &ext);
+        const std::filesystem::path dir = doa_recordings_dir();
+        std::lock_guard<std::mutex> lk(g_doa_up_name_mu);
+        std::error_code ec;
+        final_name = u->name;
+        for (int k = 2; std::filesystem::exists(dir / final_name, ec) && k < 1000; k++)
+            final_name = base + "_" + std::to_string(k) + ext;
+        if (std::filesystem::exists(dir / final_name, ec)) msg = "no free name for " + u->name;
+        // fs_replace = rename() as on Linux; on Windows it also waits out a
+        // virus scanner that still has the just-written file open
+        else if (fs_replace(u->part, (dir / final_name).string()) != 0) msg = std::string("can't rename: ") + std::strerror(errno);
+        else ok = true;
+    }
+    if (!ok) { std::error_code ec; std::filesystem::remove(u->part, ec); }
+    if (ok) std::cout << "DoA log uploaded: " << final_name << " (" << written << " bytes)" << std::endl;
+    else std::cerr << "DoA log upload " << u->name << " failed: " << msg << std::endl;
+    auto done = std::move(u->done);
+    const bool aborted = u->abort;
+    std::thread self = std::move(u->th);
+    self.detach();
+    delete u;
+    if (done && !aborted) done(ok, ok ? final_name : msg);
+}
+}  // namespace
+
+DoaUpload* doa_upload_begin(const std::string& name, uint64_t length, std::string* status, std::string* err) {
+    std::string base, ext;
+    if (!doa_upload_name_ok(name, &base, &ext)) {
+        *status = "400 Bad Request";
+        *err = "only DoA logs (.csv .txt .log .sqlite .sqlite3 .db .db3; letters, digits, _ - .) can be uploaded";
+        return nullptr;
+    }
+    if (length == 0) {
+        *status = "411 Length Required";
+        *err = "the upload needs a length";
+        return nullptr;
+    }
+    if (length > DOA_UPLOAD_MAX) {
+        *status = "413 Payload Too Large";
+        *err = "logs up to 1 GB can be replayed";
+        return nullptr;
+    }
+    const std::string dir = doa_recordings_dir();
+    uint64_t fr = 0, tot = 0;
+    constexpr uint64_t reserve = 512ull << 20;   // as the recorders keep free
+    if (diskutil::disk_space(dir, &fr, &tot) && length + reserve > fr) {
+        *status = "507 Insufficient Storage";
+        *err = "not enough free space (" + std::to_string(fr >> 20) + " MB free, keeping 512 MB)";
+        return nullptr;
+    }
+    auto* u = new DoaUpload;
+    u->name = name;
+    u->length = length;
+    const int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    u->part = dir + "/.upload-" + std::to_string(ms) + "-" + name + ".tmp";
+    u->f = std::fopen(u->part.c_str(), "wb");
+    if (!u->f) {
+        *status = "500 Internal Server Error";
+        *err = std::string("can't create the file: ") + std::strerror(errno);
+        delete u;
+        return nullptr;
+    }
+    u->th = std::thread(doa_upload_main, u);
+    return u;
+}
+
+bool doa_upload_data(DoaUpload* u, std::string_view chunk, bool* pause, std::string* err) {
+    std::lock_guard<std::mutex> lk(u->mu);
+    if (u->failed) return *err = u->error, false;
+    u->got += chunk.size();
+    if (u->got > u->length) return *err = "more data than announced", false;
+    if (!chunk.empty()) {
+        u->q.emplace_back(chunk);
+        u->queued += chunk.size();
+        u->cv.notify_all();
+    }
+    *pause = u->queued >= DOA_UP_HIGH;
+    return true;
+}
+
+void doa_upload_on_drain(DoaUpload* u, std::function<void()> f) {
+    bool now = false;
+    {
+        std::lock_guard<std::mutex> lk(u->mu);
+        if (u->queued < DOA_UP_LOW) now = true;
+        else u->on_drain = std::move(f);
+    }
+    if (now && f) f();
+}
+
+void doa_upload_finish(DoaUpload* u, std::function<void(bool, std::string)> done) {
+    std::lock_guard<std::mutex> lk(u->mu);
+    u->done = std::move(done);
+    u->finish = true;
+    u->cv.notify_all();
+}
+
+void doa_upload_abort(DoaUpload* u) {
+    std::lock_guard<std::mutex> lk(u->mu);
+    u->abort = true;
+    u->on_drain = nullptr;
+    u->cv.notify_all();
 }
 
 // ---------------------------------------------------------------------------

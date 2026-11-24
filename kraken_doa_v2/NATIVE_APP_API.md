@@ -75,7 +75,8 @@ answered `403`.
 > once when the server sends `auth_required` and remembers it in that
 > browser's localStorage.
 >
-> With a token configured, `GET /recordings/<file>` also requires it, in an
+> With a token configured, `GET /recordings/<file>` and `POST
+> /recordings_upload/<file>` (a DoA log into Saved recordings) also require it, in an
 > `X-Kraken-Token: <token>` request header (401 otherwise).
 
 ### 2b. Stream subscription (`SUBSCRIBE:`)

@@ -13,8 +13,10 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -74,6 +76,25 @@ std::string doa_recordings_dir();                            // absolute path, c
 std::string doa_sanitize_filename(const std::string& name); // basename only; "" if invalid
 std::vector<RecFile> doa_list_recordings();                 // sorted, sidecar files hidden
 bool doa_delete_recording(const std::string& name);         // deletes file (+ -wal/-shm)
+
+// Upload of a DoA log from a browser into doa_recordings/ (POST
+// /recordings_upload/<name>), so a log made elsewhere - another receiver, the
+// Android app - is listed and replayed like one recorded here. Names
+// [A-Za-z0-9._-] with a log extension (.csv .txt .log .sqlite .sqlite3 .db
+// .db3), <= DOA_UPLOAD_MAX bytes (the page's replay limit); a clash becomes
+// <base>_2.<ext>. Written by a thread of its own into a hidden part file,
+// checked at the end (an SQLite header or text) and renamed into place.
+// Same contract as rec::upload_*: upload_data says when to pause the socket,
+// on_drain runs once (writer thread) when the queue is low again, finish's
+// done(ok, final name | error) runs on the writer thread, abort = the
+// connection dropped. After finish / abort the pointer is gone.
+constexpr uint64_t DOA_UPLOAD_MAX = 1024ull * 1024 * 1024;
+struct DoaUpload;
+DoaUpload* doa_upload_begin(const std::string& name, uint64_t length, std::string* status, std::string* err);
+bool doa_upload_data(DoaUpload* u, std::string_view chunk, bool* pause, std::string* err);
+void doa_upload_on_drain(DoaUpload* u, std::function<void()> f);
+void doa_upload_finish(DoaUpload* u, std::function<void(bool, std::string)> done);
+void doa_upload_abort(DoaUpload* u);
 
 class DoaLogger {
 public:

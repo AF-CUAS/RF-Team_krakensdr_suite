@@ -177,3 +177,38 @@ folder (index: `README.md` here, or the table in `kraken_doa_v2/CLAUDE.md`);
   (57,600 rows) loads in 3.3 s, heat in ~26 s, a frame <= ~10 ms with all
   lines + power dots, 60 MB JS heap
 
+
+**⬆ Upload of a DoA log into Saved recordings (2026-11-24):**
+- The user's request: "you can only replay recording done during that
+  session. We want to be able to upload recordings and replay them". The
+  Saved recordings list was always the whole `doa_recordings/` folder (it
+  survives restarts), but a log made elsewhere - another receiver, the
+  Android app, an older copy - could only be opened in the browser (the
+  map's 📂 / a drop), not kept on the receiver for every page. So: an
+  **Upload** button under the list (`logUpload()`, `#rec-up-file`, note
+  line `#rec-up-note`); the stored file is selected and Replay plays it
+- `POST /recordings_upload/<name>` (websocket_server.cpp, beside
+  `GET /recordings/*`: Host / Origin checks, the API token as for the
+  download). `doa_upload_*` in doa_logger.cpp, the same contract as the IQ
+  recorder's `rec::upload_*`: a writer thread, the socket paused above
+  16 MB queued and resumed below 4 MB, a hidden part file
+  `.upload-<ms>-<name>.tmp` (dot name: never served; `.tmp`: never listed),
+  fflush + fdatasync, then renamed with `fs_replace`. Rules: names
+  `[A-Za-z0-9._-]`, not starting with `.` / `-`, <= 128 chars, extension
+  .csv .txt .log .sqlite .sqlite3 .db .db3 (the replay's open dialog minus
+  -wal); length required, <= 1 GB (`DOA_UPLOAD_MAX`, the replay's limit);
+  512 MB of the drive kept free; content = the SQLite header, a UTF-16
+  BOM or no NUL in the first 4 KB, else 422 and deleted; a clash gets
+  `<base>_2.<ext>` (picked at the end under a mutex). 200 answers the
+  stored name; the page then sends `LOG_LIST`, whose broadcast updates every
+  page. A `-wal` alone is refused on the page (open a pair on the map)
+- Not refused during a playback: an explicit user action that only adds a
+  file to the folder, like the IQ recorder's upload. An older receiver
+  answers 404 -> "Upload refused: ..."
+- Tests (job scratch, WSL TEST build on 28080): CSV / SQLite stored byte
+  for byte and downloaded back the same, clash -> drive_2.csv, random bytes
+  422, .exe / dot name / `..%2F` 400, no length 411, foreign Host / Origin
+  403, 300 MB in 1.1 s identical, a connection cut mid-upload -> "aborted",
+  no part file left, server up; headless Edge (real click on Replay): Upload
+  -> "stored", listed + selected, Replay loads all 300 rows of a synthetic
+  drive, junk -> refused note, no page errors

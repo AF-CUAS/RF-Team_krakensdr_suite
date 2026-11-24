@@ -2745,7 +2745,7 @@ body.drive.drive-day .drive-hud,body.drive.drive-day .ui-dlg-bg {
     <!-- DoA Recording (doa_logger.cpp): bearings to a file. Not the 📼 recorder below (IQ / audio) -->
     <div class="sb-section coh-only" data-sb="doa-recording">
       <div class="sb-header" onclick="toggleSection(this)">
-        <h3><span class="sb-title"><svg class="ic" aria-hidden="true"><use href="#i-doc"/></svg><span>DoA Recording</span></span><span class="help" tabindex="0" role="button" aria-label="Help">?<span class="tip">Logs the <b>DoA results</b> (bearing, confidence and the lobe of every VFO) to a file <b>on this device's disk</b> (<span class="os-lin">the KrakenPi</span><span class="os-win">the receiver's computer</span>), not your browser - for IQ samples or audio use the <b>IQ &amp; Audio Recorder</b>. <b>Legacy CSV</b> matches DOA_value.html line-for-line; <b>SQLite</b> is a compact, app-readable database for plotting on a map - <b>Replay</b> under Saved Recordings plays one back on this page's map (track, bearings, heat map). The interval applies to both formats; below the actual DoA data rate it logs at the data rate, and duplicate frames are never written.</span></span></h3>
+        <h3><span class="sb-title"><svg class="ic" aria-hidden="true"><use href="#i-doc"/></svg><span>DoA Recording</span></span><span class="help" tabindex="0" role="button" aria-label="Help">?<span class="tip">Logs the <b>DoA results</b> (bearing, confidence and the lobe of every VFO) to a file <b>on this device's disk</b> (<span class="os-lin">the KrakenPi</span><span class="os-win">the receiver's computer</span>), not your browser - for IQ samples or audio use the <b>IQ &amp; Audio Recorder</b>. <b>Legacy CSV</b> matches DOA_value.html line-for-line; <b>SQLite</b> is a compact, app-readable database for plotting on a map - <b>Replay</b> under Saved Recordings plays one back on this page's map (track, bearings, heat map); <b>Upload</b> adds a log from this computer (one from another KrakenSDR or the Android app) to the list, kept on the receiver for every page. The interval applies to both formats; below the actual DoA data rate it logs at the data rate, and duplicate frames are never written.</span></span></h3>
         <span class="sb-toggle"></span>
       </div>
       <div class="sb-content">
@@ -2786,6 +2786,11 @@ body.drive.drive-day .drive-hud,body.drive.drive-day .ui-dlg-bg {
             <button id="rec-replay-btn" class="btn sm" style="flex:1 1 auto" onclick="replaySelected()" title="Play the selected recording back on the map: the track, bearings, lobes and the heat map of where the transmitter is (the map's Replay)"><svg class="ic" aria-hidden="true"><use href="#i-replay"/></svg><span>Replay</span></button>
             <button class="btn sm danger" style="flex:1 1 auto" onclick="deleteSelected()"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg><span>Delete</span></button>
           </div>
+          <div class="ctrl-row" style="margin-top:6px;gap:6px">
+            <button id="rec-upload-btn" class="btn sm" style="flex:1 1 auto" onclick="$id('rec-up-file').click()" title="Upload a DoA log from this computer (CSV or SQLite: one downloaded from another KrakenSDR, or the Android app's log) into Saved recordings, to replay it"><svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg><span>Upload</span></button>
+            <input type="file" id="rec-up-file" accept=".csv,.txt,.log,.sqlite,.sqlite3,.db,.db3,text/csv" style="display:none" onchange="logUpload(this)">
+          </div>
+          <div id="rec-up-note" style="font-size:11px;color:var(--t3);margin-top:4px;word-break:break-all"></div>
         </div>
       </div>
     </div>
@@ -17316,6 +17321,38 @@ pacman -S --needed mingw-w64-ucrt-x86_64-fdk-aac`,
     } finally {
       if (btn) { btn.disabled = false; btn.innerHTML = label; }
     }
+  }
+  // ⬆ a DoA log from this computer into the receiver's doa_recordings/
+  // (POST recordings_upload/<name>): listed for every page, then Replay as
+  // any recording. The receiver checks it is SQLite or text and renames on a clash
+  function logUpload(input) {
+    const f = input.files && input.files[0];
+    input.value = '';
+    if (!f) return;
+    const note = (html, bad) => { const el = $id('rec-up-note'); if (el) { el.style.color = bad ? 'var(--bad-t)' : 'var(--t3)'; el.innerHTML = html; } };
+    if (/-wal$/i.test(f.name)) { note('That is only the -wal part of an SQLite log: upload the database file (or open the pair on the map: Layers → Replay)', true); return; }
+    if (!/\.(csv|txt|log|sqlite3?|db3?)$/i.test(f.name)) { note('Only DoA logs (.csv, .sqlite, .db …) can be uploaded', true); return; }
+    if (f.size > 1024 * 1024 * 1024) { note(escapeHtml(f.name) + ' is ' + formatBytes(f.size) + ' - logs up to 1 GB can be replayed', true); return; }
+    if (!f.size) { note(escapeHtml(f.name) + ' is empty', true); return; }
+    const name = f.name.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^[._-]+/, '').slice(-128);
+    const btn = $id('rec-upload-btn');
+    if (btn) btn.disabled = true;
+    const x = new XMLHttpRequest();
+    x.open('POST', 'recordings_upload/' + encodeURIComponent(name));
+    const token = storedToken();
+    if (token) x.setRequestHeader('X-Kraken-Token', token);
+    x.upload.onprogress = e => { if (e.lengthComputable) note(escapeHtml(name) + ': ' + (e.loaded / e.total * 100).toFixed(0) + ' % of ' + formatBytes(e.total)); };
+    x.onload = () => {
+      if (btn) btn.disabled = false;
+      if (x.status === 200) {
+        recSelected = x.responseText || name;
+        note(escapeHtml(recSelected) + ': stored - selected below, press Replay');
+        send('LOG_LIST');
+      } else note('Upload refused: ' + escapeHtml(x.responseText || ('HTTP ' + x.status)), true);
+    };
+    x.onerror = () => { if (btn) btn.disabled = false; note('Upload failed (connection)', true); };
+    note(escapeHtml(name) + ': starting…');
+    x.send(f);
   }
   function deleteSelected() {
     if (!recSelected) { recNoneSelected(); return; }

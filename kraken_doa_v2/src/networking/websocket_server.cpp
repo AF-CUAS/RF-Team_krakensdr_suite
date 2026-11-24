@@ -646,6 +646,68 @@ uWS::SSLApp WebSocketServer::create_ssl_app() {
             }
             stream_download(res, doa_recordings_dir() + "/" + name, name);
         })
+        .post("/recordings_upload/*", [](auto* res, auto* req) {
+            if (!request_allowed(req)) { refuse_request(res, req); return; }
+            // 📝 a DoA log from this computer into doa_recordings/ - listed
+            // under Saved recordings and replayed like one recorded here.
+            // Token as for the download. Answers 200 with the stored name
+            if (auth_required() && !token_matches(req->getHeader("x-kraken-token"))) {
+                res->writeStatus("401 Unauthorized")->end("Access token required");
+                return;
+            }
+            std::string url(req->getUrl());
+            const std::string prefix = "/recordings_upload/";
+            const std::string name = url_decode(url.size() > prefix.size() ? url.substr(prefix.size()) : "");
+            if (!request_name_ok(name)) {
+                res->writeStatus("400 Bad Request")->end("not a valid file name");
+                return;
+            }
+            const std::string cl(req->getHeader("content-length"));
+            const uint64_t len = cl.empty() ? 0 : strtoull(cl.c_str(), nullptr, 10);
+            std::string status, err;
+            DoaUpload* up = doa_upload_begin(name, len, &status, &err);
+            if (!up) {
+                res->writeStatus(status)->end(err);
+                return;
+            }
+            struct St { DoaUpload* up; bool aborted = false; };
+            auto st = std::make_shared<St>(St{up});
+            res->onAborted([st]() {
+                st->aborted = true;
+                if (st->up) doa_upload_abort(st->up);
+                st->up = nullptr;
+            });
+            res->onData([res, st](std::string_view chunk, bool last) {
+                if (!st->up) return;
+                bool pause = false;
+                std::string e;
+                if (!doa_upload_data(st->up, chunk, &pause, &e)) {
+                    doa_upload_abort(st->up);
+                    st->up = nullptr;
+                    res->writeStatus("500 Internal Server Error")->end(e);
+                    return;
+                }
+                if (last) {
+                    DoaUpload* u = st->up;
+                    st->up = nullptr;
+                    doa_upload_finish(u, [res, st](bool ok, std::string msg) {
+                        if (!loop) return;
+                        loop->defer([res, st, ok, msg]() {
+                            if (st->aborted) return;
+                            res->writeStatus(ok ? "200 OK" : "422 Unprocessable Entity")->end(msg);
+                        });
+                    });
+                    return;
+                }
+                if (pause) {
+                    res->pause();
+                    doa_upload_on_drain(st->up, [res, st]() {
+                        if (!loop) return;
+                        loop->defer([res, st]() { if (!st->aborted) res->resume(); });
+                    });
+                }
+            });
+        })
         .get("/recording/*", [](auto* res, auto* req) {
             if (!request_allowed(req)) { refuse_request(res, req); return; }
             // 📼 a recording of the recorder's folder: /recording/<name> (an IQ
